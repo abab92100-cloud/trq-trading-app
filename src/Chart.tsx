@@ -102,21 +102,16 @@ export default function Chart() {
       x.fillText(fmtPx(v), W - AXIS + 4, y + 3);
     }
 
-    // منطقة الدخول (أوامر الشبكة المسلّحة/المفتوحة)
-    const band = (list, color, label) => {
+    // خط واحد لكل منطقة (بدل المربع المعبّأ الذي كان يغطي الشموع)
+    const zoneLine = (list, col, dash, label) => {
       if (!list.length) return;
-      let bLo = Infinity, bHi = -Infinity;
-      for (const g of list) { bLo = Math.min(bLo, g.price); bHi = Math.max(bHi, g.price); }
-      const y1 = py(bHi), y2 = py(bLo);
-      x.fillStyle = color.fill;
-      x.fillRect(4, y1, plotW - 4, Math.max(2, y2 - y1));
-      x.strokeStyle = color.edge; x.setLineDash([2, 3]); x.lineWidth = 1;
-      x.strokeRect(4, y1, plotW - 4, Math.max(2, y2 - y1)); x.setLineDash([]);
-      x.fillStyle = color.text; x.font = '9px Tahoma'; x.textAlign = 'left';
-      x.fillText(label + ' ×' + list.length, 8, Math.min(y2 - 4, y1 + 11));
+      const avgP = list.reduce((s, g) => s + g.price, 0) / list.length;
+      const y = py(avgP);
+      x.strokeStyle = col; x.lineWidth = 1.4; x.setLineDash(dash);
+      x.beginPath(); x.moveTo(4, y); x.lineTo(W - AXIS, y); x.stroke(); x.setLineDash([]);
+      x.fillStyle = col; x.font = '9px Tahoma'; x.textAlign = 'left';
+      x.fillText(label + ' ×' + list.length + '  ' + fmtPx(avgP), 8, y - 4);
     };
-    band(entries, { fill: 'rgba(245,158,11,.10)', edge: 'rgba(245,158,11,.45)', text: '#f59e0b' }, 'منطقة الدخول');
-    band(tps, { fill: 'rgba(34,197,94,.10)', edge: 'rgba(34,197,94,.45)', text: '#22c55e' }, 'منطقة جني الربح');
 
     // الشموع
     const cw = Math.max(1, (plotW - 8) / candles.length * 0.62);
@@ -129,6 +124,10 @@ export default function Chart() {
       const yO = py(k.o), yC = py(k.c);
       x.fillRect(cx - cw / 2, Math.min(yO, yC), cw, Math.max(1, Math.abs(yC - yO)));
     }
+
+    // خطا الدخول وجني الربح فوق الشموع (خط واحد لكل منطقة)
+    zoneLine(entries, '#f59e0b', [5, 4], 'الدخول');
+    zoneLine(tps, '#22c55e', [5, 4], 'جني الربح');
 
     // خط أفقي بشارة سعر
     const hline = (v, col, dash, label) => {
@@ -181,8 +180,8 @@ export default function Chart() {
         onDoubleClick={() => setViewN(MAX_CANDLES)} />
       <div className="subtle" style={{ textAlign: 'center', fontSize: 9, marginTop: 2, opacity: .7 }}>قرِّب وبعِّد بإصبعين على الشارت · نقرة مزدوجة لإعادة الضبط</div>
       <div className="subtle" style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 4, fontSize: 9.5 }}>
-        <span style={{ color: '#f59e0b' }}>▩ منطقة الدخول</span>
-        <span style={{ color: '#22c55e' }}>▩ جني الربح</span>
+        <span style={{ color: '#f59e0b' }}>┄ الدخول</span>
+        <span style={{ color: '#22c55e' }}>┄ جني الربح</span>
         <span style={{ color: '#f59e0b' }}>— المتوسط</span>
         <span style={{ color: '#f43f5e' }}>┄ التصفية</span>
       </div>
