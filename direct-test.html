@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TRQ - اختبار الاتصال المباشر بـ KuCoin</title>
+<style>
+body{font-family:system-ui,Arial,sans-serif;background:#0d1117;color:#e6edf3;padding:16px;max-width:640px;margin:0 auto}
+h1{font-size:20px} .box{border-radius:10px;padding:12px;margin:12px 0;font-size:14px;line-height:1.8}
+.ok{background:#0f2e17;border:1px solid #2ea043} .bad{background:#3d1418;border:1px solid #f85149}
+.wait{background:#1f2e40;border:1px solid #388bfd} code{background:#161b22;padding:2px 6px;border-radius:6px}
+button{padding:10px 18px;border:0;border-radius:8px;background:#238636;color:#fff;font-size:15px;cursor:pointer}
+.price{font-size:26px;font-weight:bold;color:#2ea043}
+</style></head><body>
+<h1>TRQ - اختبار الاتصال المباشر بـ KuCoin Futures</h1>
+<p style="font-size:13px;color:#9198a1">هذه الصفحة تختبر الاتصال المباشر (بدون أي وسيط) من جهازك إلى خوادم كوكوين. اضغط الزر ثم اقرأ النتيجتين بالأسفل.</p>
+<button onclick="run()">ابدأ الاختبار</button>
+<div id="t1" class="box wait">1) طلب مباشر لسعر البيتكوين (REST)... بانتظار البدء</div>
+<div id="t2" class="box wait">2) بث مباشر للأسعار (WebSocket)... بانتظار البدء</div>
+<div id="t3" class="box wait">3) الخلاصة</div>
+<script>
+var r1=false,r2=false;
+function set(id,cls,txt){var e=document.getElementById(id);e.className='box '+cls;e.innerHTML=txt;}
+function verdict(){
+ if(r1&&r2){set('t3','ok','<b>النتيجة: الاتصال المباشر يعمل 100% من هذا الجهاز</b><br>يمكنك الآن فتح التطبيق وربط مفاتيحك.');}
+ else if(r1||r2){set('t3','wait','<b>النتيجة: اتصال جزئي</b><br>أحد المسارين محجوب من هذه الشبكة. جرّب شبكة الجوال بدل الواي فاي.');}
+ else{set('t3','bad','<b>النتيجة: الشبكة الحالية تحجب الاتصال المباشر بكوكوين</b><br>الحل: شغّل وسيط Cloudflare (worker.js) ثم ضع رابطه في حقل رابط الوسيط.');}
+}
+async function run(){
+ r1=false;r2=false;
+ set('t1','wait','1) جاري الطلب المباشر...');
+ try{
+  var res=await fetch('https://api-futures.kucoin.com/api/v1/contracts/XBTUSDTM');
+  var j=await res.json();
+  if(j&&j.data&&j.data.lastTradePrice){r1=true;
+   set('t1','ok','<b>نجح الطلب المباشر</b><br>سعر البيتكوين الآن: <span class=price>'+j.data.lastTradePrice+'</span> دولار<br>رمز العقد: '+j.data.symbol);}
+  else{set('t1','bad','وصل الرد لكنه غير متوقع: '+JSON.stringify(j).slice(0,120));}
+ }catch(e){set('t1','bad','<b>فشل الطلب المباشر</b><br>'+e.message+'<br>هذا يعني أن الجهاز/الشبكة يمنع الاتصال المباشر.');}
+ verdict();
+ set('t2','wait','2) جاري الاتصال بالبث المباشر...');
+ try{
+  var b=await fetch('https://api-futures.kucoin.com/api/v1/bullet-public',{method:'POST'});
+  var bj=await b.json();
+  var d=bj.data; if(!d||!d.token) throw new Error('لم يصل رمز البث');
+  var ws=new WebSocket(d.endpoint+'/endpoint?token='+d.token+'&connectId=trqtest');
+  var n=0;
+  ws.onopen=function(){ws.send(JSON.stringify({id:'sub1',type:'subscribe',topic:'/contractMarket/ticker:XBTUSDTM',response:true}));};
+  ws.onmessage=function(ev){var m=JSON.parse(ev.data);
+   if(m.subject==='ticker'||m.topic==='/contractMarket/ticker:XBTUSDTM'){n++;
+    if(!r2){r2=true;set('t2','ok','<b>البث المباشر يعمل</b><br>سعر لحظي: <span class=price>'+m.data.price+'</span><br>عدد الرسائل: '+n);verdict();}
+    else{set('t2','ok','<b>البث المباشر يعمل</b><br>سعر لحظي: <span class=price>'+m.data.price+'</span><br>عدد الرسائل: '+n);}}};
+  ws.onerror=function(){if(!r2){set('t2','bad','فشل البث المباشر (WebSocket محجوب).');verdict();}};
+  ws.onclose=function(){if(!r2){set('t2','bad','انقطع البث المباشر قبل وصول أي سعر.');verdict();}};
+ }catch(e){set('t2','bad','فشل البث المباشر: '+e.message);verdict();}
+}
+</script></body></html>
