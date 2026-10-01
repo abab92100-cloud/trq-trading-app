@@ -14,12 +14,16 @@ const TFS = [
   { label: '1س', gran: 60 },
   { label: '4س', gran: 240 },
 ];
-const MAX_CANDLES = 90;
+const MAX_CANDLES = 90;   // عدد الشموع الافتراضي المعروض
+const DATA_CAP = 220;     // أقصى عدد مخزّن (حد التكبير الخارجي)
+const kCache = {};        // ذاكرة مؤقتة — تمنع اختفاء الشارت عند التنقل بين الشاشات
 
 export default function Chart() {
   const ref = useRef(null);
-  const dataRef = useRef({ key: '', candles: [], loading: false });
   const [gran, setGran] = useState(1);
+  const [viewN, setViewN] = useState(MAX_CANDLES); // عدد الشموع المعروض (تكبير/تصغير)
+  const pinch = useRef(null);
+  const dataRef = useRef({ key: '', candles: kCache[S.config.symbol + ':1'] || [], loading: false });
 
   // جلب الشموع عند تغيير الزوج أو الإطار + تحديث دوري
   useEffect(() => {
@@ -29,7 +33,9 @@ export default function Chart() {
       dataRef.current.loading = true;
       fetchKlines(S.config.symbol, gran).then(k => {
         if (!alive) return;
-        dataRef.current = { key, candles: k.slice(-220), loading: false };
+        const cs = k.slice(-DATA_CAP);
+        kCache[key] = cs;
+        dataRef.current = { key, candles: cs, loading: false };
       }).catch(() => { if (alive) dataRef.current.loading = false; });
     };
     load();
@@ -48,7 +54,7 @@ export default function Chart() {
     const plotW = W - AXIS - 8, plotH = H - TOP - BOT;
 
     // دمج السعر الحي في آخر شمعة
-    let candles = dataRef.current.candles.slice(-MAX_CANDLES);
+    let candles = dataRef.current.candles.slice(-viewN);
     const granMs = gran * 60000;
     const p = S.lastPrice;
     if (candles.length && p > 0) {
@@ -161,7 +167,19 @@ export default function Chart() {
             }}>{tf.label}</button>
         ))}
       </div>
-      <canvas ref={ref} style={{ width: '100%', height: 240, display: 'block' }} />
+      <canvas ref={ref}
+        style={{ width: '100%', height: 240, display: 'block', touchAction: 'none' }}
+        onTouchStart={e => { if (e.touches.length === 2) pinch.current = { d: Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY), n: viewN }; }}
+        onTouchMove={e => {
+          if (pinch.current && e.touches.length === 2) {
+            const nd = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+            if (nd > 10) setViewN(Math.max(15, Math.min(DATA_CAP, Math.round(pinch.current.n * pinch.current.d / nd))));
+          }
+        }}
+        onTouchEnd={() => { pinch.current = null; }}
+        onWheel={e => setViewN(c => Math.max(15, Math.min(DATA_CAP, c + (e.deltaY > 0 ? 6 : -6))))}
+        onDoubleClick={() => setViewN(MAX_CANDLES)} />
+      <div className="subtle" style={{ textAlign: 'center', fontSize: 9, marginTop: 2, opacity: .7 }}>قرِّب وبعِّد بإصبعين على الشارت · نقرة مزدوجة لإعادة الضبط</div>
       <div className="subtle" style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 4, fontSize: 9.5 }}>
         <span style={{ color: '#f59e0b' }}>▩ منطقة الدخول</span>
         <span style={{ color: '#22c55e' }}>▩ جني الربح</span>
