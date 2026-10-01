@@ -33,10 +33,18 @@ export default function Chart() {
       dataRef.current.loading = true;
       fetchKlines(S.config.symbol, gran).then(k => {
         if (!alive) return;
+        if (!k.length) throw new Error('empty');
         const cs = k.slice(-DATA_CAP);
         kCache[key] = cs;
-        dataRef.current = { key, candles: cs, loading: false };
-      }).catch(() => { if (alive) dataRef.current.loading = false; });
+        dataRef.current = { key, candles: cs, loading: false, fails: 0 };
+        if (typeof window !== 'undefined') window.__chartDbg = { key, n: cs.length, first: cs[0] && cs[0].t, last: cs.length && cs[cs.length - 1].t, at: Date.now() };
+      }).catch(() => {
+        if (!alive) return;
+        const f = (dataRef.current.fails || 0) + 1;
+        dataRef.current.loading = false; dataRef.current.fails = f;
+        // فشل متكرر = اتصال مقطوع — إعادة محاولة سريعة بدل الانتظار الطويل
+        if (f >= 2) setTimeout(() => { if (alive) load(); }, 4000);
+      });
     };
     load();
     const iv = setInterval(load, 15000);
@@ -68,7 +76,8 @@ export default function Chart() {
     }
     if (candles.length < 2) {
       x.fillStyle = '#5b6a7d'; x.font = '11px Tahoma'; x.textAlign = 'center';
-      x.fillText('يُحمَّل الشارت…', W / 2, H / 2); return;
+      const fails = dataRef.current.fails || 0;
+      x.fillText(fails >= 2 ? 'تعذّر تحميل الشارت — يُعاد الاتصال تلقائيًا…' : 'يُحمَّل الشارت…', W / 2, H / 2); return;
     }
 
     // نطاق السعر — أساسه الشموع فقط (+ المتوسط/التصفية القريبين)؛ أوامر الشبكة لا تُدخَل في النطاق حتى لا تسحق الشموع

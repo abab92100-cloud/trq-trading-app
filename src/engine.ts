@@ -27,12 +27,28 @@ const volSum=l=>(l||[]).reduce((a,b)=>a+(b.size||0),0);
 function roundTick(p,t){ if(!t||t<=0) return p;
   const n=Math.round(p/t)*t, d=Math.max(0,Math.ceil(-Math.log10(t)));
   return Number(n.toFixed(d)); }
-function beep(){ try{ const c=new (window.AudioContext||window.webkitAudioContext)();
-  const o=c.createOscillator(),g=c.createGain(); o.type='sine'; o.frequency.value=880;
-  g.gain.value=.06; o.connect(g); g.connect(c.destination); o.start();
-  o.stop(c.currentTime+.15);}catch(e){} }
-function notify(txt){ if(S.sound){ beep(); try{navigator.vibrate&&navigator.vibrate(120);}catch(e){} }
-  pushLog('fill',txt); }
+function beep(tone){ try{ const c=new (window.AudioContext||window.webkitAudioContext)();
+  const o=c.createOscillator(),g=c.createGain(); o.connect(g); g.connect(c.destination);
+  const t=c.currentTime;
+  if(tone==='bell'){ o.type='sine'; o.frequency.setValueAtTime(1319,t);
+    o.frequency.setValueAtTime(1760,t+.1);
+    g.gain.setValueAtTime(.16,t); g.gain.exponentialRampToValueAtTime(.001,t+.35); o.start(t); o.stop(t+.36); }
+  else if(tone==='alarm'){ o.type='square'; o.frequency.value=540;
+    g.gain.setValueAtTime(.1,t); g.gain.setValueAtTime(0,t+.12);
+    g.gain.setValueAtTime(.1,t+.18); g.gain.setValueAtTime(0,t+.32); o.start(t); o.stop(t+.36); }
+  else { o.type='sine'; o.frequency.setValueAtTime(880,t);
+    o.frequency.exponentialRampToValueAtTime(660,t+.14);
+    g.gain.setValueAtTime(.1,t); g.gain.exponentialRampToValueAtTime(.001,t+.22); o.start(t); o.stop(t+.24); }
+  setTimeout(()=>{ try{c.close();}catch(e){} },800); }catch(e){} }
+/* إشعارات الجوال الأصلية — تعمل والتطبيق في الخلفية */
+function lnPlugin(){ try{ return window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.LocalNotifications; }catch(e){ return null; } }
+function nativeNotify(title,body,ongoing){ const LN=lnPlugin(); if(!LN) return;
+  LN.requestPermissions().then(r=>{ if(r.display!=='granted') return;
+    LN.schedule({notifications:[{id:ongoing?7:((Date.now()%2000000000)+10),
+      title,body,ongoing:!!ongoing,autoCancel:!ongoing}]}).catch(()=>{}); }).catch(()=>{}); }
+function clearNativeOngoing(){ const LN=lnPlugin(); if(LN) LN.cancel({notifications:[{id:7}]}).catch(()=>{}); }
+function notify(txt){ if(S.sound){ beep(S.soundTone); try{navigator.vibrate&&navigator.vibrate(120);}catch(e){} }
+  pushLog('fill',txt); nativeNotify('TRQ Trading',txt); }
 
 /* ---------- مخزن الحالة + إشعارات الواجهة ---------- */
 const listeners=new Set();
@@ -60,7 +76,7 @@ export const S = {
   huntAnchor:null, gridAnchor:null, lastHuntAt:0, lastAddAt:0, lastWorkAt:0, huntCount:0,
   liqPrice:null, exLiqPrice:null, mmr:0.004,
   orderBook:{bids:[],asks:[]}, startedAt:null, activeCycle:null,
-  ignoreExchangeUntil:0, lastTickAt:null, sound:true,
+  ignoreExchangeUntil:0, lastTickAt:null, sound:true, soundTone:'soft',
   toastMsg:null, _metaAt:0, _lastTrailAt:0,
 };
 
@@ -69,6 +85,7 @@ function saveAll(){ try{
   localStorage.setItem('trq:cfg',JSON.stringify(S.config));
   localStorage.setItem('trq:keys',S.keys?JSON.stringify(S.keys):'');
   localStorage.setItem('trq:snd',S.sound?'1':'0');
+  localStorage.setItem('trq:tone',S.soundTone||'soft');
   const rt={grid:S.grid,position:S.position,journal:S.journal,realizedPnl:S.realizedPnl,
     feesPaid:S.feesPaid,priceTrail:S.priceTrail,cvd:S.cvd,huntCount:S.huntCount,
     lastPrice:S.lastPrice,markPrice:S.markPrice,activeCycle:S.activeCycle,status:S.status,
@@ -79,6 +96,7 @@ function loadAll(){ try{
   const cfg=JSON.parse(localStorage.getItem('trq:cfg')||'null'); if(cfg) S.config={...S.config,...cfg};
   const ks=localStorage.getItem('trq:keys'); if(ks){ try{S.keys=JSON.parse(ks);}catch(e){S.keys=null;} }
   S.sound=localStorage.getItem('trq:snd')!=='0';
+  S.soundTone=localStorage.getItem('trq:tone')||'soft';
   const rt=JSON.parse(localStorage.getItem('trq:rt')||'null');
   if(rt){ Object.assign(S,{grid:rt.grid||[],position:rt.position||null,journal:rt.journal||[],
     realizedPnl:rt.realizedPnl||0,feesPaid:rt.feesPaid||0,priceTrail:rt.priceTrail||[],
@@ -490,9 +508,25 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     const net=pnl-entryFee-exitFee;
     const stuck=!!(S.position&&adversePct(p)>=0.45);
     const minNet=stuck?0.04:MIN_NET_USD;
+
+    // ——— الجني الذكي المتحرك ———
+    // ما دام السعر يتقدم لصالحنا نتبعه ونرفع الربح المقفل،
+    // وعند أول ارتداد حقيقي نغلق فورًا — الربح لا يعود خسارة أبدًا
+    if(tp.trailBest!=null){
+      const better=side==='short'?p<tp.trailBest:p>tp.trailBest;
+      if(better) tp.trailBest=p;
+      const retrace=side==='short'?(p-tp.trailBest)/tp.trailBest*100
+                                  :(tp.trailBest-p)/tp.trailBest*100;
+      const dist=Math.max(0.05,Math.min(0.25,(S.config.gridStepPct||0.3)*0.35));
+      if(retrace>=dist||net<=0.01) fillLevel(tp.id,p,true);
+      continue; }
+
     if(net<minNet) continue;
-    if(!(shouldFill(tp,p)||net>=minNet*1.15)) continue;
-    fillLevel(tp.id,p,true); } }
+    // تسامح بمقدار نصف تكة — «السعر عند المستوى» يُفعّل التتبع فورًا
+    const tol=Math.min(S.tickSize>0?S.tickSize*0.5:1e-12, Math.abs(tp.price)*0.0005);
+    const crossed=tp.side==='sell'?p>=tp.price-tol:p<=tp.price+tol;
+    // بدل الإغلاق عند أول لمسة: فعّل التتبع لالتقاط حركة أكبر إن استمرت
+    if(crossed||net>=minNet*1.15) tp.trailBest=p; } }
 function trailHuntAnchor(p){ if(!p||S.status!=='running') return;
   if(!S.huntAnchor){S.huntAnchor=p;return;}
   if(S.config.direction==='short'){ if(p>S.huntAnchor)S.huntAnchor=p; }
@@ -719,6 +753,8 @@ function onStreamTick(d){
       S.emaFast=nextEma(S.emaFast,d.price,2/10);
       S.emaSlow=nextEma(S.emaSlow,d.price,2/22);
       S._lastTrailAt=now; }
+    // تنفيذ فوري لجني الربح مع كل نبضة سعر — لا انتظار لدورة المحرك
+    if(S.status==='running'){ try{ harvestRipe(d.price); }catch(e){} }
   }
   if(d.book) S.orderBook=d.book;
   if(d.trade&&d.trade.price>0){
@@ -801,29 +837,32 @@ async function botTick(){
   if(!running&&!paused&&S.status!=='idle') return;
   try{
     const full=S.heartbeat%5===0||!S.tape.length;
-    const m=await loadMarket(full);
+    // القرارات تعتمد سعر القناة اللحظي؛ REST للإثراء فقط — فشله لا يوقف التنفيذ أبدًا
+    let m={price:S.lastPrice||S.markPrice||0,markPrice:S.markPrice||S.lastPrice||0};
+    try{ m=await loadMarket(full); }catch(e){}
+    const price=S.lastPrice||m.price||0;
     if(S.status==='idle'){ applyMeta(m); emit(); saveAll(); return; }
     S.heartbeat++;
     applyMeta(m);
     resolveDirection(Date.now());
-    if(running){
-      escapeAdverse(m.price);
-      harvestRipe(m.price);
-      const due=S.grid.filter(l=>shouldFill(l,m.price));
-      for(const l of selectDueAdds(due,m.price)){
+    if(running&&price>0){
+      escapeAdverse(price);
+      harvestRipe(price);
+      const due=S.grid.filter(l=>shouldFill(l,price));
+      for(const l of selectDueAdds(due,price)){
         const before=filledAdds(); fillLevel(l.id,l.price,false);
         if(filledAdds()>before) S.lastAddAt=Date.now(); }
-      const hunt=huntTrigger(m.price);
+      const hunt=huntTrigger(price);
       if(hunt){ let done=false;
         if(S.config.mode==='live'&&S.keys){
           try{ await exPlaceMarket(S.config.symbol,hunt.side,hunt.qty); done=true; }
           catch(e){ pushLog('error','فشل صيد السوق: '+(e.message||e)); } }
         else done=true;
-        if(done) maybeHunt(m.price); }
-      ensureGrid(); harvestRipe(m.price);
+        if(done) maybeHunt(price); }
+      ensureGrid(); harvestRipe(price);
     }
-    pruneGhosts(); markUnrealized(m.price);
-    await liveSync();
+    pruneGhosts(); markUnrealized(price||m.price);
+    try{ await liveSync(); }catch(e){}
     emit(); saveAll();
   }catch(e){ S.lastTickAt=Date.now();
     if(!/abort|timeout|429|50[0-4]|fetch/i.test(e.message||'')) pushLog('error',e.message||String(e)); }
@@ -843,6 +882,7 @@ export function startBot(){ if(S.status==='running') return;
       ...buildGrid(S.position?S.position.entry:p)]; }
   pushLog('server','دورة جديدة '+(S.config.direction==='short'?'شورت':'لونغ')+
     (S.regime?' · '+S.regime.label:'')+' — الشبكة والصيد يعملان');
+  nativeNotify('TRQ يعمل ✓','البوت متصل بـ KuCoin ويتداول '+(S.config.displaySymbol||S.config.symbol)+' — يستمر حتى في الخلفية',true);
   toast('البوت يعمل الآن'); emit(); saveAll(); }
 export function pauseBot(){ if(S.status!=='running') return;
   S.status='paused';
@@ -858,6 +898,7 @@ export async function stopBot(){ if(S.status==='idle') return;
   if(S.config.mode==='live'&&S.keys&&prevSide){
     try{ await exCancelAll(S.config.symbol); await exClose(S.config.symbol,prevSide);}catch(e){} }
   flattenAt(p,'إيقاف'); S.status='stopped';
+  clearNativeOngoing();
   pushLog('info','إيقاف — أُغلقت كل الصفقات عند السعر الحالي');
   toast('تم إيقاف البوت'); emit(); saveAll(); }
 export function newCycle(){ const rolled=Math.max(0.01,
@@ -867,12 +908,12 @@ export function newCycle(){ const rolled=Math.max(0.01,
   // أرشفة صفقات الدورة المنتهية بدل مسحها — السجل يبقى تراكميًا عبر الدورات
   S.history=[...S.journal.filter(j=>j.status!=='open'),...S.history].slice(0,300);
   const cfg={...S.config,cycleBalance:rolled};
-  const keys=S.keys, snd=S.sound, hist=S.history, logs=S.logs;
+  const keys=S.keys, snd=S.sound, tone=S.soundTone, hist=S.history, logs=S.logs;
   Object.assign(S,{grid:[],position:null,journal:[],realizedPnl:0,feesPaid:0,
     activeCycle:null,huntCount:0,huntOpen:0,priceTrail:[],emaFast:null,emaSlow:null,
     cvd:0,tape:[],orderBook:{bids:[],asks:[]},status:'idle',startedAt:null,
     huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null});
-  S.config=cfg; S.keys=keys; S.sound=snd; S.history=hist; S.logs=logs;
+  S.config=cfg; S.keys=keys; S.sound=snd; S.soundTone=tone; S.history=hist; S.logs=logs;
   pushLog('info','دورة جديدة — رصيد '+rolled.toFixed(2)+' — سجل الصفقات محفوظ');
   toast('دورة جديدة برصيد $'+rolled.toFixed(2));
   emit(); saveAll(); if(keep) startBot(); }
@@ -902,6 +943,7 @@ export function saveCfg(v){
   S.config.directionMode=v.directionMode;
   S.config.mode=v.mode;
   S.sound=!!v.sound;
+  if(v.soundTone) S.soundTone=v.soundTone;
   if(sym!==old){
     S.grid=[]; S.position=null; S.journal=[];
     S.realizedPnl=0; S.feesPaid=0; S.ignoreExchangeUntil=Date.now()+12000;

@@ -286,7 +286,7 @@ function SettingsScreen() {
   const [bal, setBal] = useState(c.cycleBalance);
   const [dirMode, setDirMode] = useState(c.directionMode);
   const [mode, setMode] = useState(c.mode);
-  const [sound, setSound] = useState(S.sound);
+  const [tone, setTone] = useState(S.sound ? (S.soundTone || 'soft') : 'mute');
   return (
     <section>
       <div className="card">
@@ -350,12 +350,14 @@ function SettingsScreen() {
           <option value="paper">ورقي — محاكاة بدون أوامر حقيقية</option>
           <option value="live">حقيقي — أوامر على KuCoin</option>
         </select>
-        <label className="lb" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}>
-          <input type="checkbox" checked={sound} onChange={e => setSound(e.target.checked)} style={{ width: 18, height: 18, accentColor: 'var(--accent)' }} />
-          تنبيه صوتي واهتزاز عند التعبئة
-        </label>
+        <label className="lb">صوت التنبيه عند التعبئة</label>
+        <div className="symrow">
+          {[{ k: 'soft', l: 'هادئ' }, { k: 'bell', l: 'جرس' }, { k: 'alarm', l: 'تنبيه قوي' }, { k: 'mute', l: 'صامت' }].map(t => (
+            <button key={t.k} className={tone === t.k ? 'on' : ''} onClick={() => setTone(t.k)}>{t.l}</button>
+          ))}
+        </div>
         <button className="btn acc" style={{ marginTop: 12, width: '100%' }}
-          onClick={() => saveCfg({ symbol, leverage: lev, levels, gridStepPct: step, huntPct: hunt, cycleBalance: bal, directionMode: dirMode, mode, sound })}>
+          onClick={() => saveCfg({ symbol, leverage: lev, levels, gridStepPct: step, huntPct: hunt, cycleBalance: bal, directionMode: dirMode, mode, sound: tone !== 'mute', soundTone: tone === 'mute' ? 'soft' : tone })}>
           حفظ المعاملات
         </button>
       </div>

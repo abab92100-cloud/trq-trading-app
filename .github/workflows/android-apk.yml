@@ -30,9 +30,85 @@ jobs:
 
       - name: Wrap with Capacitor Android shell
         run: |
-          npm install --no-save --no-audit --no-fund @capacitor/cli @capacitor/core @capacitor/android
+          npm install --no-save --no-audit --no-fund @capacitor/cli @capacitor/core @capacitor/android @capacitor/local-notifications
           npx --yes cap add android
           npx --yes cap sync android
+
+      - name: Add foreground keep-alive service (background trading)
+        run: |
+          mkdir -p android/app/src/main/java/com/trq/trading
+          cat > android/app/src/main/java/com/trq/trading/KeepAliveService.java <<'JAVA'
+          package com.trq.trading;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.Service;
+          import android.content.Intent;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+
+          public class KeepAliveService extends Service {
+              private PowerManager.WakeLock wakeLock;
+
+              @Override public void onCreate() {
+                  super.onCreate();
+                  String ch = "trq_keepalive";
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel c = new NotificationChannel(ch, "TRQ", NotificationManager.IMPORTANCE_MIN);
+                      getSystemService(NotificationManager.class).createNotificationChannel(c);
+                  }
+                  Notification n = new Notification.Builder(this, ch)
+                          .setContentTitle("TRQ Trading")
+                          .setContentText("البوت متصل بالمنصة ويعمل")
+                          .setSmallIcon(android.R.drawable.stat_notify_sync)
+                          .setOngoing(true)
+                          .build();
+                  startForeground(42, n);
+                  PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                  wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "trq:keepalive");
+                  wakeLock.acquire();
+              }
+
+              @Override public int onStartCommand(Intent i, int f, int s) { return START_STICKY; }
+
+              @Override public void onDestroy() {
+                  if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+                  super.onDestroy();
+              }
+
+              @Override public IBinder onBind(Intent i) { return null; }
+          }
+          JAVA
+          python3 - <<'PY'
+          p = 'android/app/src/main/java/com/trq/trading/MainActivity.java'
+          s = open(p).read()
+          if 'KeepAliveService' not in s:
+              s = s.replace(
+                  'public class MainActivity extends BridgeActivity {}',
+                  'public class MainActivity extends BridgeActivity {\n'
+                  '    @Override public void onCreate(android.os.Bundle b) {\n'
+                  '        super.onCreate(b);\n'
+                  '        android.content.Intent i = new android.content.Intent(this, KeepAliveService.class);\n'
+                  '        if (android.os.Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);\n'
+                  '    }\n'
+                  '}')
+              open(p, 'w').write(s)
+          m = 'android/app/src/main/AndroidManifest.xml'
+          x = open(m).read()
+          if 'FOREGROUND_SERVICE' not in x:
+              x = x.replace('<application',
+                  '<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n'
+                  '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />\n'
+                  '    <uses-permission android:name="android.permission.WAKE_LOCK" />\n'
+                  '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n'
+                  '    <application', 1)
+              x = x.replace('</application>',
+                  '<service android:name=".KeepAliveService" android:foregroundServiceType="dataSync" android:exported="false" />\n'
+                  '    </application>')
+              open(m, 'w').write(x)
+          PY
 
       - name: Fix Kotlin stdlib version conflict
         run: |
