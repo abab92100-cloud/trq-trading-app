@@ -71,17 +71,14 @@ export default function Chart() {
       x.fillText('يُحمَّل الشارت…', W / 2, H / 2); return;
     }
 
-    // نطاق السعر — أساسه الشموع؛ تُضاف المناطق فقط ضمن نطاق منطقي حول السعر
+    // نطاق السعر — أساسه الشموع فقط (+ المتوسط/التصفية القريبين)؛ أوامر الشبكة لا تُدخَل في النطاق حتى لا تسحق الشموع
     let lo = Infinity, hi = -Infinity;
     for (const k of candles) { if (k.l < lo) lo = k.l; if (k.h > hi) hi = k.h; }
     const refPx = p || (candles[candles.length - 1].c) || 1;
-    const sane = v => v > 0 && v > refPx * 0.55 && v < refPx * 1.8; // استبعاد أوامر شاذة تسحق المحور
-    const entries = S.grid.filter(g => !g.reduceOnly && (g.status === 'armed' || g.status === 'open') && sane(g.price));
-    const tps = S.grid.filter(g => g.reduceOnly && (g.status === 'armed' || g.status === 'open') && sane(g.price));
+    const sane = v => v > 0 && v > refPx * 0.55 && v < refPx * 1.8; // استبعاد قيم شاذة تسحق المحور
     const avg = S.position && sane(S.position.entry) ? S.position.entry : null;
     let liq = S.liqPrice || (S.position && S.position.liquidation) || null;
     if (liq && !sane(liq)) liq = null;
-    for (const g of entries.concat(tps)) { lo = Math.min(lo, g.price); hi = Math.max(hi, g.price); }
     if (avg) { lo = Math.min(lo, avg); hi = Math.max(hi, avg); }
     if (liq) { lo = Math.min(lo, liq); hi = Math.max(hi, liq); }
     if (p) { lo = Math.min(lo, p); hi = Math.max(hi, p); }
@@ -102,17 +99,6 @@ export default function Chart() {
       x.fillText(fmtPx(v), W - AXIS + 4, y + 3);
     }
 
-    // خط واحد لكل منطقة (بدل المربع المعبّأ الذي كان يغطي الشموع)
-    const zoneLine = (list, col, dash, label) => {
-      if (!list.length) return;
-      const avgP = list.reduce((s, g) => s + g.price, 0) / list.length;
-      const y = py(avgP);
-      x.strokeStyle = col; x.lineWidth = 1.4; x.setLineDash(dash);
-      x.beginPath(); x.moveTo(4, y); x.lineTo(W - AXIS, y); x.stroke(); x.setLineDash([]);
-      x.fillStyle = col; x.font = '9px Tahoma'; x.textAlign = 'left';
-      x.fillText(label + ' ×' + list.length + '  ' + fmtPx(avgP), 8, y - 4);
-    };
-
     // الشموع
     const cw = Math.max(1, (plotW - 8) / candles.length * 0.62);
     for (let i = 0; i < candles.length; i++) {
@@ -124,10 +110,6 @@ export default function Chart() {
       const yO = py(k.o), yC = py(k.c);
       x.fillRect(cx - cw / 2, Math.min(yO, yC), cw, Math.max(1, Math.abs(yC - yO)));
     }
-
-    // خطا الدخول وجني الربح فوق الشموع (خط واحد لكل منطقة)
-    zoneLine(entries, '#f59e0b', [5, 4], 'الدخول');
-    zoneLine(tps, '#22c55e', [5, 4], 'جني الربح');
 
     // خط أفقي بشارة سعر
     const hline = (v, col, dash, label) => {
@@ -179,12 +161,35 @@ export default function Chart() {
         onWheel={e => setViewN(c => Math.max(15, Math.min(DATA_CAP, c + (e.deltaY > 0 ? 6 : -6))))}
         onDoubleClick={() => setViewN(MAX_CANDLES)} />
       <div className="subtle" style={{ textAlign: 'center', fontSize: 9, marginTop: 2, opacity: .7 }}>قرِّب وبعِّد بإصبعين على الشارت · نقرة مزدوجة لإعادة الضبط</div>
-      <div className="subtle" style={{ display: 'flex', gap: 12, justifyContent: 'center', marginTop: 4, fontSize: 9.5 }}>
-        <span style={{ color: '#f59e0b' }}>┄ الدخول</span>
-        <span style={{ color: '#22c55e' }}>┄ جني الربح</span>
-        <span style={{ color: '#f59e0b' }}>— المتوسط</span>
-        <span style={{ color: '#f43f5e' }}>┄ التصفية</span>
-      </div>
+      <DataStrip />
+    </div>
+  );
+}
+
+/* شريط بيانات حي تحت الشارت — الدخول/جني الربح/المتوسط/التصفية أرقامًا محدّثة لحظيًا */
+function DataStrip() {
+  const entL = S.grid.filter(g => !g.reduceOnly && (g.status === 'armed' || g.status === 'open'));
+  const tpL = S.grid.filter(g => g.reduceOnly && (g.status === 'armed' || g.status === 'open'));
+  const avgOf = l => l.length ? l.reduce((s, g) => s + g.price, 0) / l.length : null;
+  const items = [
+    { label: 'الدخول', col: '#f59e0b', val: avgOf(entL), n: entL.length },
+    { label: 'جني الربح', col: '#22c55e', val: avgOf(tpL), n: tpL.length },
+    { label: 'المتوسط', col: '#f59e0b', val: S.position ? S.position.entry : null, n: 0 },
+    { label: 'التصفية', col: '#f43f5e', val: S.liqPrice || (S.position && S.position.liquidation) || null, n: 0 },
+  ];
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, marginTop: 8 }}>
+      {items.map(it => (
+        <div key={it.label} style={{
+          background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8,
+          padding: '5px 8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 10,
+        }}>
+          <span style={{ color: it.col, fontWeight: 700 }}>{it.label}{it.n ? ' ×' + it.n : ''}</span>
+          <b className="mono" style={{ color: it.val ? '#e6edf3' : 'var(--muted)', fontSize: 10.5 }}>
+            {it.val ? fmtPx(it.val) : '—'}
+          </b>
+        </div>
+      ))}
     </div>
   );
 }

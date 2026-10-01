@@ -235,12 +235,13 @@ function PosScreen() {
 
 /* ---------- السجل ---------- */
 function JournalScreen() {
+  const rows = [...S.journal, ...(S.history || [])];
   return (
     <section>
       <div className="card">
-        <h3>سجل الصفقات</h3>
+        <h3>سجل الصفقات — تراكمي عبر كل الدورات</h3>
         <div>
-          {S.journal.length ? S.journal.slice(0, 40).map(j => {
+          {rows.length ? rows.slice(0, 60).map(j => {
             const pnl = j.status === 'closed' ? j.pnl : (S.lastPrice ?
               ((j.side === 'short' ? 1 : -1) * (j.entry - S.lastPrice) * (S.multiplier || 1) * j.qty - j.fees) : 0);
             return (
@@ -302,8 +303,20 @@ function SettingsScreen() {
           <button className="btn dgr" onClick={() => { clearKeys(); setApiKey(''); setApiSecret(''); setApiPass(''); }}>حذف المفاتيح</button>
         </div>
         <div className="subtle" style={{ textAlign: 'center', marginTop: 8 }}>
-          {S.keys ? 'محفوظ ••' + S.keys.apiKey.slice(-4) : 'غير مربوط'}
+          {S.keys
+            ? (S.linkOk ? '✅ مربوط بالمنصة فعليًا ••' + S.keys.apiKey.slice(-4) : '⏳ محفوظ — جارٍ التحقق من المنصة…')
+            : 'غير مربوط'}
         </div>
+        {S.keys && S.exEquity != null && (
+          <div style={{ textAlign: 'center', marginTop: 6, fontWeight: 800, color: 'var(--accent)', fontSize: 15 }}>
+            الرصيد الكلي في المنصة: ${S.exEquity.toFixed(2)}
+          </div>
+        )}
+        {S.keys && !S.linkOk && S.exEquity == null && (
+          <div className="subtle" style={{ textAlign: 'center', marginTop: 4, color: '#f43f5e', fontSize: 10 }}>
+            تعذّر الوصول للمنصة — تحقق من المفاتيح والصلاحيات، يُعاد المحاولة تلقائيًا كل 20 ثانية
+          </div>
+        )}
         <div className="sep"></div>
         <p className="note">✅ الاتصال يمر الآن عبر بروكسي محلي مدمج — لا حاجة لبروكسي CORS خارجي. البيانات اللحظية تصل عبر قناة WebSocket مستمرة.</p>
       </div>

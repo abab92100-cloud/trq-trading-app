@@ -53,6 +53,7 @@ export const S = {
   status:'idle', heartbeat:0, lastPrice:null, markPrice:null,
   multiplier:1, tickSize:0.1, makerFee:0.0002, takerFee:0.0006, funding:0,
   grid:[], position:null, journal:[], logs:[],
+  history:[], linkOk:false, exEquity:null,
   realizedPnl:0, feesPaid:0,
   priceTrail:[], emaFast:null, emaSlow:null, cvd:0, tape:[],
   biasScore:0, biasReasons:[], regime:null, confluence:null,
@@ -70,7 +71,8 @@ function saveAll(){ try{
   localStorage.setItem('trq:snd',S.sound?'1':'0');
   const rt={grid:S.grid,position:S.position,journal:S.journal,realizedPnl:S.realizedPnl,
     feesPaid:S.feesPaid,priceTrail:S.priceTrail,cvd:S.cvd,huntCount:S.huntCount,
-    lastPrice:S.lastPrice,markPrice:S.markPrice,activeCycle:S.activeCycle,status:S.status};
+    lastPrice:S.lastPrice,markPrice:S.markPrice,activeCycle:S.activeCycle,status:S.status,
+    history:S.history,logs:S.logs};
   localStorage.setItem('trq:rt',JSON.stringify(rt));
 }catch(e){} }
 function loadAll(){ try{
@@ -81,7 +83,8 @@ function loadAll(){ try{
   if(rt){ Object.assign(S,{grid:rt.grid||[],position:rt.position||null,journal:rt.journal||[],
     realizedPnl:rt.realizedPnl||0,feesPaid:rt.feesPaid||0,priceTrail:rt.priceTrail||[],
     cvd:rt.cvd||0,huntCount:rt.huntCount||0,lastPrice:rt.lastPrice??null,
-    markPrice:rt.markPrice??null,activeCycle:rt.activeCycle||null,status:rt.status||'idle'}); }
+    markPrice:rt.markPrice??null,activeCycle:rt.activeCycle||null,status:rt.status||'idle',
+    history:rt.history||[],logs:rt.logs||[]}); }
 }catch(e){} }
 
 /* ---------- السجل ---------- */
@@ -857,26 +860,31 @@ export function newCycle(){ const rolled=Math.max(0.01,
     Math.round((S.config.cycleBalance+S.realizedPnl-S.feesPaid)*100)/100);
   const keep=S.status==='running'||S.status==='paused';
   if(S.config.mode==='live'&&S.keys) exCancelAll(S.config.symbol).catch(()=>{});
+  // أرشفة صفقات الدورة المنتهية بدل مسحها — السجل يبقى تراكميًا عبر الدورات
+  S.history=[...S.journal.filter(j=>j.status!=='open'),...S.history].slice(0,300);
   const cfg={...S.config,cycleBalance:rolled};
-  const keys=S.keys, snd=S.sound;
+  const keys=S.keys, snd=S.sound, hist=S.history, logs=S.logs;
   Object.assign(S,{grid:[],position:null,journal:[],realizedPnl:0,feesPaid:0,
     activeCycle:null,huntCount:0,huntOpen:0,priceTrail:[],emaFast:null,emaSlow:null,
     cvd:0,tape:[],orderBook:{bids:[],asks:[]},status:'idle',startedAt:null,
     huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null});
-  S.config=cfg; S.keys=keys; S.sound=snd;
-  pushLog('info','دورة جديدة — رصيد '+rolled.toFixed(2)+' — مُسح السجل');
+  S.config=cfg; S.keys=keys; S.sound=snd; S.history=hist; S.logs=logs;
+  pushLog('info','دورة جديدة — رصيد '+rolled.toFixed(2)+' — سجل الصفقات محفوظ');
   toast('دورة جديدة برصيد $'+rolled.toFixed(2));
   emit(); saveAll(); if(keep) startBot(); }
 
 /* ---------- إجراءات الإعدادات ---------- */
 export async function saveKeys(k){
   if(!k.apiKey||!k.apiSecret||!k.passphrase){ toast('أدخل المفتاح والسر والعبارة'); return false; }
-  S.keys=k; saveAll();
-  try{ const eq=await exPing(); toast('تم الربط ✓ حقوقك $'+(eq!=null?eq.toFixed(2):'—')); }
-  catch(e){ toast('فشل التحقق: '+(e.message||e)); }
-  emit(); return true;
+  S.keys=k; S.linkOk=false; saveAll(); emit();
+  try{ const eq=await exPing();
+    S.linkOk=true; S.exEquity=eq;
+    toast('تم الربط ✓ الرصيد $'+(eq!=null?eq.toFixed(2):'—'));
+  }catch(e){ S.linkOk=false; S.exEquity=null;
+    toast('حُفظت المفاتيح لكن فشل الاتصال: '+(e.message||e)); }
+  emit(); return S.linkOk;
 }
-export function clearKeys(){ S.keys=null; saveAll(); emit(); toast('حُذفت المفاتيح'); }
+export function clearKeys(){ S.keys=null; S.linkOk=false; S.exEquity=null; saveAll(); emit(); toast('حُذفت المفاتيح'); }
 export function saveCfg(v){
   const old=S.config.symbol;
   const sym=(v.symbol||old).trim().toUpperCase();
@@ -931,5 +939,10 @@ export function initEngine(){
   setInterval(botTick,TICK_MS);
   setInterval(emit,1000);
   setInterval(()=>{ if(S.status==='idle') botTick().catch(()=>{}); },6000);
+  // تحديث رصيد المنصة باستمرار عند وجود مفاتيح — يظهر في الإعدادات فورًا
+  const refreshBal=()=>{ if(!S.keys) return;
+    exPing().then(eq=>{ if(eq!=null){ S.exEquity=eq; S.linkOk=true; } })
+      .catch(()=>{ S.linkOk=false; }); };
+  refreshBal(); setInterval(refreshBal,20000);
   emit();
 }
