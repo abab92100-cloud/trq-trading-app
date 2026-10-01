@@ -214,14 +214,26 @@ const exOrders = symbol => kcPrivate('GET','/api/v1/orders?status=active&symbol=
     return a.map(o=>({orderId:o.id,clientOid:o.clientOid||null,side:o.side==='sell'?'sell':'buy',
       price:+o.price,size:+o.size,reduceOnly:!!o.reduceOnly}));})
   .catch(()=>[]);
+/* وضع هامش الأمر لا يتطابق مع المنصة؟ — اضبط الوضع على المنصة ثم أعد المحاولة بلا حقل marginMode */
+const mmTried={};
+async function placeOrderSmart(body){
+  try{ return await kcPrivate('POST','/api/v1/orders',body); }
+  catch(e){ const m=e.message||String(e);
+    if(!/margin.?mode|هامش الأمر|الوضع المحدد/i.test(m)) throw e;
+    if(!mmTried[body.symbol]){ mmTried[body.symbol]=1;
+      try{ await kcPrivate('POST','/api/v1/marginMode/change',{symbol:body.symbol,marginMode:'ISOLATED'}); }catch(_){}
+      try{ await kcPrivate('POST','/api/v1/position/margin/change-margin-mode',{symbol:body.symbol,marginMode:'ISOLATED'}); }catch(_){}
+    }
+    const b2={...body}; delete b2.marginMode; // اتبع وضع الهامش الحالي للحساب
+    return await kcPrivate('POST','/api/v1/orders',b2); } }
 function exPlaceLimit(intent){
-  return kcPrivate('POST','/api/v1/orders',{clientOid:intent.clientOid,symbol:intent.symbol,
+  return placeOrderSmart({clientOid:intent.clientOid,symbol:intent.symbol,
     side:intent.side,type:'limit',price:String(intent.price),size:intent.qty,
     leverage:String(intent.leverage),timeInForce:'GTC',reduceOnly:!!intent.reduceOnly,
     marginMode:'ISOLATED'});
 }
 function exPlaceMarket(symbol,side,qty){
-  return kcPrivate('POST','/api/v1/orders',{clientOid:'hunt_'+Date.now().toString(36),
+  return placeOrderSmart({clientOid:'hunt_'+Date.now().toString(36),
     symbol,side,type:'market',size:qty,leverage:String(S.config.leverage),marginMode:'ISOLATED'});
 }
 const exCancelAll = symbol => kcPrivate('DELETE','/api/v1/orders?symbol='+encodeURIComponent(symbol)).catch(()=>{});
@@ -825,7 +837,10 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
         if(/access denied|permission/i.test(m)){ if(!S.permDenied){ S.permDenied=true;
           pushLog('error','⛔ المفتاح يقرأ الرصيد لكن بلا صلاحية تداول — من KuCoin: إدارة API ← تعديل المفتاح ← فعّل «التداول» للعقود الآجلة ثم احفظ المفاتيح مجددًا');
           toast('⚠️ فعّل صلاحية التداول في مفتاح KuCoin'); } break; }
-        pushLog('error','أمر '+l.side+' @ '+fmtPx(l.price)+': '+m); } }
+        // كبح تكرار نفس الخطأ — مرة كل دقيقة كافية
+        if(!window.__lastOrdErrAt||Date.now()-window.__lastOrdErrAt>60000){
+          window.__lastOrdErrAt=Date.now();
+          pushLog('error','أمر '+l.side+' @ '+fmtPx(l.price)+': '+m); } } }
     const liveIds=new Set(S.grid.filter(l=>l.exchangeOrderId).map(l=>l.exchangeOrderId));
     for(const o of exs){ if(!liveIds.has(o.orderId)){
       try{ await kcPrivate('DELETE','/api/v1/orders/'+o.orderId); }catch(e){} } }

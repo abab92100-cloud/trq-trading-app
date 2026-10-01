@@ -80,19 +80,16 @@ export default function Chart() {
       x.fillText(fails >= 2 ? 'تعذّر تحميل الشارت — يُعاد الاتصال تلقائيًا…' : 'يُحمَّل الشارت…', W / 2, H / 2); return;
     }
 
-    // نطاق السعر — أساسه الشموع فقط (+ المتوسط/التصفية القريبين)؛ أوامر الشبكة لا تُدخَل في النطاق حتى لا تسحق الشموع
+    // نطاق السعر — أساسه الشموع والسعر الحي فقط؛ المتوسط/التصفية يُرسمان فقط إن وقعا داخل النطاق
     let lo = Infinity, hi = -Infinity;
     for (const k of candles) { if (k.l < lo) lo = k.l; if (k.h > hi) hi = k.h; }
-    const refPx = p || (candles[candles.length - 1].c) || 1;
-    const sane = v => v > 0 && v > refPx * 0.55 && v < refPx * 1.8; // استبعاد قيم شاذة تسحق المحور
-    const avg = S.position && sane(S.position.entry) ? S.position.entry : null;
-    let liq = S.liqPrice || (S.position && S.position.liquidation) || null;
-    if (liq && !sane(liq)) liq = null;
-    if (avg) { lo = Math.min(lo, avg); hi = Math.max(hi, avg); }
-    if (liq) { lo = Math.min(lo, liq); hi = Math.max(hi, liq); }
     if (p) { lo = Math.min(lo, p); hi = Math.max(hi, p); }
     const pad = (hi - lo) * 0.06 || hi * 0.002 || 1;
     lo -= pad; hi += pad;
+    const inRange = v => v > 0 && v >= lo && v <= hi;
+    const avg = S.position && inRange(S.position.entry) ? S.position.entry : null;
+    let liq = S.liqPrice || (S.position && S.position.liquidation) || null;
+    if (liq && !inRange(liq)) liq = null; // بعيد عن النطاق — يظهر رقمًا في الشريط أسفل الشارت فقط
     const py = v => TOP + (hi - v) / (hi - lo) * plotH;
     const px = i => 4 + i * (plotW - 8) / (candles.length - 1);
 
