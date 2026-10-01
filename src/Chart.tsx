@@ -68,8 +68,8 @@ export default function Chart() {
     // نطاق السعر — أساسه الشموع؛ تُضاف المناطق فقط ضمن نطاق منطقي حول السعر
     let lo = Infinity, hi = -Infinity;
     for (const k of candles) { if (k.l < lo) lo = k.l; if (k.h > hi) hi = k.h; }
-    const ref = p || (candles[candles.length - 1].c) || 1;
-    const sane = v => v > 0 && v > ref * 0.55 && v < ref * 1.8; // استبعاد أوامر شاذة تسحق المحور
+    const refPx = p || (candles[candles.length - 1].c) || 1;
+    const sane = v => v > 0 && v > refPx * 0.55 && v < refPx * 1.8; // استبعاد أوامر شاذة تسحق المحور
     const entries = S.grid.filter(g => !g.reduceOnly && (g.status === 'armed' || g.status === 'open') && sane(g.price));
     const tps = S.grid.filter(g => g.reduceOnly && (g.status === 'armed' || g.status === 'open') && sane(g.price));
     const avg = S.position && sane(S.position.entry) ? S.position.entry : null;
