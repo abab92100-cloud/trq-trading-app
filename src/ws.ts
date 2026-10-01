@@ -6,7 +6,9 @@
    - يشترك في: السعر اللحظي + دفتر الأوامر + الصفقات المنفذة
    - نبض ping/pong حسب مواصفات KuCoin + إعادة اتصال تلقائية
    ================================================================ */
-let REST = '/kucoin';
+const DIRECT='https://api-futures.kucoin.com';
+// على الجوال (Capacitor) لا بروكسي — مباشر من البداية
+let REST=(typeof window!=='undefined'&&(window.Capacitor||location.protocol==='capacitor:'))?DIRECT:'/kucoin';
 
 export const streamState = {
   connected:false, connecting:false, lastMsgAt:0, bookAt:0, tradeAt:0,
@@ -21,11 +23,13 @@ async function getBullet(){
   async function tryFetch(base){
     const res=await fetch(base+'/api/v1/bullet-public',{method:'POST',cache:'no-store'});
     if(!res.ok) throw new Error('bullet http '+res.status);
+    // خادم الجوال المحلي يرجع HTML برمز 200 — اعتبره فشل بروكسي وتحوّل للمباشر
+    if(!((res.headers.get('content-type')||'').toLowerCase().includes('json'))) throw new Error('bullet not json');
     return res;
   }
   let res;
   try{ res=await tryFetch(REST); }
-  catch(e){ REST='https://api-futures.kucoin.com'; res=await tryFetch(REST); }
+  catch(e){ if(REST===DIRECT) throw e; REST=DIRECT; res=await tryFetch(REST); }
   const j=await res.json();
   if(j.code!=='200000') throw new Error(j.msg||('bullet '+j.code));
   const srv=(j.data.instanceServers||[])[0]||{};

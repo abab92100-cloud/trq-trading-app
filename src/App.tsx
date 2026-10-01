@@ -28,6 +28,9 @@ const I = {
   cycle: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>,
 };
 
+/* عرض الرمز بدون لاحقة M الخاصة بعقود KuCoin — SHIBUSDTM ← SHIB/USDT */
+const dispSym = s => String(s || '').replace(/USDTM$/i, '/USDT').replace(/^XBT/i, 'BTC');
+
 /* ---------- بحث أزواج المنصة ---------- */
 function SymbolPicker({ value, onPick }) {
   const [query, setQuery] = useState('');
@@ -40,7 +43,7 @@ function SymbolPicker({ value, onPick }) {
     : all.slice(0, 12);
   return (
     <div style={{ position: 'relative' }}>
-      <input className="field" value={open ? query : value}
+      <input className="field" value={open ? query : dispSym(value)}
         placeholder="ابحث باسم العملة… مثل BTC أو PEPE"
         onFocus={() => { setOpen(true); setQuery(''); }}
         onChange={e => { setQuery(e.target.value); setOpen(true); }} />
@@ -58,7 +61,7 @@ function SymbolPicker({ value, onPick }) {
                 color: c.symbol === value ? 'var(--accent)' : 'var(--fg)',
                 fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'ui-monospace,monospace',
               }}>
-              <span>{c.symbol}</span>
+              <span>{dispSym(c.symbol)}</span>
               <span style={{ color: 'var(--muted)', fontSize: 10 }}>{c.base}/USDT</span>
             </button>
           )) : <div className="subtle" style={{ textAlign: 'center', padding: 12 }}>لا نتائج — جرّب اسمًا آخر</div>}
@@ -315,6 +318,11 @@ function SettingsScreen() {
         {S.keys && !S.linkOk && S.exEquity == null && (
           <div className="subtle" style={{ textAlign: 'center', marginTop: 4, color: '#f43f5e', fontSize: 10 }}>
             تعذّر الوصول للمنصة — تحقق من المفاتيح والصلاحيات، يُعاد المحاولة تلقائيًا كل 20 ثانية
+          </div>
+        )}
+        {S.permDenied && (
+          <div className="note" style={{ border: '1px solid rgba(244,63,94,.5)', borderRadius: 10, padding: 10, marginTop: 8, color: '#f43f5e', background: 'rgba(244,63,94,.08)' }}>
+            ⛔ مفتاحك يقرأ الرصيد لكنه <b>بلا صلاحية تداول</b> — لهذا رفضت المنصة كل الأوامر. الحل: في KuCoin ← إدارة API ← تعديل المفتاح ← فعّل صلاحية «التداول» (Trade) للعقود الآجلة ← ثم اضغط «حفظ المفاتيح» هنا مجددًا.
           </div>
         )}
         <div className="sep"></div>

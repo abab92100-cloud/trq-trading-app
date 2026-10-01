@@ -76,7 +76,7 @@ export const S = {
   huntAnchor:null, gridAnchor:null, lastHuntAt:0, lastAddAt:0, lastWorkAt:0, huntCount:0,
   liqPrice:null, exLiqPrice:null, mmr:0.004,
   orderBook:{bids:[],asks:[]}, startedAt:null, activeCycle:null,
-  ignoreExchangeUntil:0, lastTickAt:null, sound:true, soundTone:'soft',
+  ignoreExchangeUntil:0, lastTickAt:null, sound:true, soundTone:'soft', permDenied:false,
   toastMsg:null, _metaAt:0, _lastTrailAt:0,
 };
 
@@ -614,13 +614,12 @@ function computeLiq(){ const dir=S.position?S.position.side:S.config.direction;
   const mmr=lev>=75?0.025:lev>=50?0.012:lev>=25?0.008:lev>=10?0.005:0.004;
   const liqFee=Math.max(S.takerFee,0.0005);
   const notional=entry*q*mult;
-  const wallet=Math.max(0,S.config.cycleBalance+S.realizedPnl-S.feesPaid+
-    (S.position?S.position.unrealized:0));
+  // هامش معزول حقيقي = قيمة المركز ÷ الرافعة (+ الربح الجاري) — وليس رصيد الدورة كاملًا
+  const margin=notional/lev+(S.position?Math.max(0,S.position.unrealized||0):0);
   if(dir==='long'){ const den=q*mult*(1-mmr-liqFee); if(den<=0) return null;
-    const margin=Math.min(wallet,notional*(1-mmr-liqFee-0.002));
     const lp=(notional-margin)/den; return lp>0?lp:null; }
   const den=q*mult*(1+mmr+liqFee); if(den<=0) return null;
-  return (notional+wallet)/den; }
+  return (notional+margin)/den; }
 function refreshLiq(){ const local=computeLiq();
   if(S.exLiqPrice&&S.exLiqPrice>0&&!S.grid.some(g=>!g.reduceOnly&&g.status==='armed'&&!g.exchangeOrderId)){
     S.liqPrice=S.exLiqPrice; }
@@ -818,11 +817,15 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
         price:o.price,qty:o.size,status:'open',reduceOnly:o.reduceOnly,
         exchangeOrderId:o.orderId,filledAt:null,origin:'grid'}); }
     const want=S.grid.filter(l=>(l.status==='armed'));
-    for(const l of want){ if(l.exchangeOrderId) continue;
+    if(!S.permDenied) for(const l of want){ if(l.exchangeOrderId) continue;
       try{ const r=await exPlaceLimit({clientOid:l.clientOid,symbol:sym,side:l.side,
         price:l.price,qty:l.qty,reduceOnly:l.reduceOnly,leverage:S.config.leverage});
         l.status='open'; l.exchangeOrderId=r.orderId;
-      }catch(e){ pushLog('error','أمر '+l.side+' @ '+fmtPx(l.price)+': '+(e.message||e)); } }
+      }catch(e){ const m=e.message||String(e);
+        if(/access denied|permission/i.test(m)){ if(!S.permDenied){ S.permDenied=true;
+          pushLog('error','⛔ المفتاح يقرأ الرصيد لكن بلا صلاحية تداول — من KuCoin: إدارة API ← تعديل المفتاح ← فعّل «التداول» للعقود الآجلة ثم احفظ المفاتيح مجددًا');
+          toast('⚠️ فعّل صلاحية التداول في مفتاح KuCoin'); } break; }
+        pushLog('error','أمر '+l.side+' @ '+fmtPx(l.price)+': '+m); } }
     const liveIds=new Set(S.grid.filter(l=>l.exchangeOrderId).map(l=>l.exchangeOrderId));
     for(const o of exs){ if(!liveIds.has(o.orderId)){
       try{ await kcPrivate('DELETE','/api/v1/orders/'+o.orderId); }catch(e){} } }
@@ -853,10 +856,14 @@ async function botTick(){
         const before=filledAdds(); fillLevel(l.id,l.price,false);
         if(filledAdds()>before) S.lastAddAt=Date.now(); }
       const hunt=huntTrigger(price);
-      if(hunt){ let done=false;
+      if(hunt&&!S.permDenied){ let done=false;
         if(S.config.mode==='live'&&S.keys){
           try{ await exPlaceMarket(S.config.symbol,hunt.side,hunt.qty); done=true; }
-          catch(e){ pushLog('error','فشل صيد السوق: '+(e.message||e)); } }
+          catch(e){ const m=e.message||String(e);
+            if(/access denied|permission/i.test(m)){ S.permDenied=true;
+              pushLog('error','⛔ المفتاح بلا صلاحية تداول — فعّل «التداول» للعقود الآجلة في KuCoin ثم احفظ المفاتيح مجددًا');
+              toast('⚠️ فعّل صلاحية التداول في مفتاح KuCoin'); }
+            else pushLog('error','فشل صيد السوق: '+m); } }
         else done=true;
         if(done) maybeHunt(price); }
       ensureGrid(); harvestRipe(price);
@@ -923,7 +930,7 @@ export async function saveKeys(k){
   if(!k.apiKey||!k.apiSecret||!k.passphrase){ toast('أدخل المفتاح والسر والعبارة'); return false; }
   S.keys=k; S.linkOk=false; saveAll(); emit();
   try{ const eq=await exPing();
-    S.linkOk=true; S.exEquity=eq;
+    S.linkOk=true; S.exEquity=eq; S.permDenied=false;
     toast('تم الربط ✓ الرصيد $'+(eq!=null?eq.toFixed(2):'—'));
   }catch(e){ S.linkOk=false; S.exEquity=null;
     toast('حُفظت المفاتيح لكن فشل الاتصال: '+(e.message||e)); }
