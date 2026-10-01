@@ -10,8 +10,8 @@ html,body{margin:0;padding:0;background:var(--bg);color:var(--fg);
   font:15px/1.7 "Segoe UI",Tahoma,Arial,sans-serif; overscroll-behavior:none}
 button{font-family:inherit}
 header{position:sticky;top:0;z-index:20;display:flex;align-items:center;gap:10px;
-  padding:10px 14px;background:rgba(10,14,20,.92);backdrop-filter:blur(10px);
-  border-bottom:1px solid var(--border)}
+  padding:calc(10px + env(safe-area-inset-top,0px)) 14px 10px;background:rgba(10,14,20,.92);
+  backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
 header .logo{width:40px;height:40px;border-radius:10px;background:var(--accent-dim);
   color:var(--accent);display:flex;align-items:center;justify-content:center;
   font-weight:800;font-size:13px;letter-spacing:.05em;border:1px solid rgba(34,197,94,.35)}
@@ -25,7 +25,7 @@ header .t span{font-size:10px;letter-spacing:.3em;color:var(--accent);font-weigh
 .pill.warn{color:var(--warn)} .pill.warn i{background:var(--warn)}
 .pill.dn-pill{color:var(--danger)} .pill.dn-pill i{background:var(--danger)}
 .pill.live{background:var(--accent-dim);color:var(--accent)}
-main{padding:12px 12px 110px;max-width:560px;margin:0 auto}
+main{padding:12px 12px calc(110px + env(safe-area-inset-bottom,0px));max-width:560px;margin:0 auto}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:14px;margin-bottom:12px}
 .card h3{margin:0 0 10px;font-size:13px;font-weight:700}
 .row{display:flex;align-items:center;justify-content:space-between;gap:8px}
@@ -57,6 +57,7 @@ label.lb{display:block;font-size:11px;color:var(--muted);margin:10px 0 4px;text-
 .bar>i{display:block;height:100%;background:var(--accent);transition:width .4s}
 .tabbar{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(13,18,26,.95);
   backdrop-filter:blur(12px);border-top:1px solid var(--border);
+  padding-bottom:env(safe-area-inset-bottom,0px);
   display:grid;grid-template-columns:repeat(4,1fr);max-width:560px;margin:0 auto}
 .tabbar button{background:none;border:none;color:var(--muted);padding:10px 4px 14px;
   font-size:10px;font-weight:700;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer}

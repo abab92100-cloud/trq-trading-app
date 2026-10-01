@@ -95,8 +95,10 @@ function pushJr(row){ S.journal=[row,...S.journal].slice(0,120); }
    عميل KuCoin — REST عبر البروكسي المحلي /kucoin
    مع تحويل تلقائي للاتصال المباشر داخل WebView/APK (بلا CORS)
    ================================================================ */
-let API_BASE = '/kucoin';
 const DIRECT_BASE = 'https://api-futures.kucoin.com';
+// داخل تطبيق الجوال (Capacitor) لا يوجد بروكسي إطلاقًا — اتصال مباشر من أول طلب
+let API_BASE = (typeof window !== 'undefined' && (window.Capacitor || location.protocol === 'capacitor:'))
+  ? DIRECT_BASE : '/kucoin';
 // AbortSignal.timeout غير مدعوم في WebViews القديمة — بديل متوافق
 function sig(ms){ const c=new AbortController(); setTimeout(()=>c.abort(),ms); return c.signal; }
 async function kcFetch(path,opts){
@@ -104,7 +106,9 @@ async function kcFetch(path,opts){
   let res;
   try{ res=await fetch(API_BASE+path,opts); }
   catch(e){ API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,opts); }
-  if(res.status===404){ API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,opts); }
+  // 404 أو استجابة HTML (خادم الجوال المحلي يرجع index.html برمز 200) = لا بروكسي — تحوّل مباشر نهائي
+  if(res.status===404 || !(res.headers.get('content-type')||'').toLowerCase().includes('json')){
+    API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,opts); }
   return res;
 }
 function normFee(raw,fb){ const n=Number(raw);
