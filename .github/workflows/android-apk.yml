@@ -31,7 +31,6 @@ jobs:
       - name: Wrap with Capacitor Android shell
         run: |
           npm install --no-save --no-audit --no-fund @capacitor/cli @capacitor/core @capacitor/android
-          npx --yes cap init "TRQ Trading" com.trq.trading --web-dir dist
           npx --yes cap add android
           npx --yes cap sync android
 

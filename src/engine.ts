@@ -94,17 +94,15 @@ function pushJr(row){ S.journal=[row,...S.journal].slice(0,120); }
    ================================================================ */
 let API_BASE = '/kucoin';
 const DIRECT_BASE = 'https://api-futures.kucoin.com';
+// AbortSignal.timeout غير مدعوم في WebViews القديمة — بديل متوافق
+function sig(ms){ const c=new AbortController(); setTimeout(()=>c.abort(),ms); return c.signal; }
 async function kcFetch(path,opts){
-  try{
-    return await fetch(API_BASE+path,opts);
-  }catch(e){
-    // البروكسي غير متاح (ملف مستقل / WebView) — انتقل للاتصال المباشر
-    if(API_BASE!==DIRECT_BASE&&/fetch|network|failed/i.test(e.message||'')){
-      API_BASE=DIRECT_BASE;
-      return await fetch(API_BASE+path,opts);
-    }
-    throw e;
-  }
+  if(API_BASE===DIRECT_BASE) return await fetch(API_BASE+path,opts);
+  let res;
+  try{ res=await fetch(API_BASE+path,opts); }
+  catch(e){ API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,opts); }
+  if(res.status===404){ API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,opts); }
+  return res;
 }
 function normFee(raw,fb){ const n=Number(raw);
   if(!Number.isFinite(n)||n<=0) return fb;
@@ -118,7 +116,7 @@ async function hmacB64(secret,payload){
 }
 async function kcPublic(path,timeout){
   const res=await kcFetch(path,{cache:'no-store',
-    signal:AbortSignal.timeout(timeout||3500)});
+    signal:sig(timeout||3500)});
   if(!res.ok) throw new Error('KuCoin '+res.status);
   const j=await res.json();
   if(j.code!=='200000') throw new Error(j.msg||j.code);
@@ -130,7 +128,7 @@ async function kcPrivate(method,path,body){
   const raw=body?JSON.stringify(body):'';
   const signStr=ts+method+path+raw;
   const res=await kcFetch(path,{method,cache:'no-store',
-    signal:AbortSignal.timeout(6000),
+    signal:sig(6000),
     headers:{'Content-Type':'application/json',
       'KC-API-KEY':S.keys.apiKey,
       'KC-API-SIGN':await hmacB64(S.keys.apiSecret,signStr),

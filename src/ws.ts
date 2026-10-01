@@ -18,13 +18,14 @@ let symbol=null, onMessage=null, onStatus=null;
 let stopped=true, attempts=0, connectSeq=0;
 
 async function getBullet(){
-  let res;
-  try{ res=await fetch(REST+'/api/v1/bullet-public',{method:'POST',cache:'no-store'}); }
-  catch(e){
-    if(REST!=='https://api-futures.kucoin.com'){ REST='https://api-futures.kucoin.com';
-      res=await fetch(REST+'/api/v1/bullet-public',{method:'POST',cache:'no-store'}); }
-    else throw e;
+  async function tryFetch(base){
+    const res=await fetch(base+'/api/v1/bullet-public',{method:'POST',cache:'no-store'});
+    if(!res.ok) throw new Error('bullet http '+res.status);
+    return res;
   }
+  let res;
+  try{ res=await tryFetch(REST); }
+  catch(e){ REST='https://api-futures.kucoin.com'; res=await tryFetch(REST); }
   const j=await res.json();
   if(j.code!=='200000') throw new Error(j.msg||('bullet '+j.code));
   const srv=(j.data.instanceServers||[])[0]||{};
