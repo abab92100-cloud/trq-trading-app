@@ -244,17 +244,25 @@ const exOrders = symbol => kcPrivate('GET','/api/v1/orders?status=active&symbol=
     return a.map(o=>({orderId:o.id,clientOid:o.clientOid||null,side:o.side==='sell'?'sell':'buy',
       price:+o.price,size:+o.size,reduceOnly:!!o.reduceOnly}));})
   .catch(()=>[]);
-/* وضع هامش الأمر لا يتطابق مع المنصة؟ — اضبط الوضع على المنصة ثم أعد المحاولة بلا حقل marginMode */
+/* رفض «وضع هامش الأمر لا يتطابق» — طابِق وضع الأمر مع وضع المركز الفعلي على المنصة قبل الإرسال */
 const mmTried={};
 async function placeOrderSmart(body){
+  // اقرأ وضع هامش المركز الحالي من المنصة (crossMode) وأرسل الأمر مطابقًا له
+  try{ const pos=await kcPrivate('GET','/api/v1/position?symbol='+encodeURIComponent(body.symbol));
+    if(pos&&typeof pos.crossMode==='boolean'){
+      body={...body,marginMode:pos.crossMode?'CROSS':'ISOLATED'}; }
+  }catch(_){}
   try{ return await kcPrivate('POST','/api/v1/orders',body); }
   catch(e){ const m=e.message||String(e);
-    if(!/margin.?mode|هامش الأمر|الوضع المحدد/i.test(m)) throw e;
+    if(!/margin|هامش/i.test(m)) throw e;
     if(!mmTried[body.symbol]){ mmTried[body.symbol]=1;
       try{ await kcPrivate('POST','/api/v1/marginMode/change',{symbol:body.symbol,marginMode:'ISOLATED'}); }catch(_){}
       try{ await kcPrivate('POST','/api/v1/position/margin/change-margin-mode',{symbol:body.symbol,marginMode:'ISOLATED'}); }catch(_){}
     }
-    const b2={...body}; delete b2.marginMode; // اتبع وضع الهامش الحالي للحساب
+    // جرّب الوضع المعاكس صراحةً، ثم بلا حقل نهائيًا (يتبع وضع الحساب)
+    try{ const alt=body.marginMode==='ISOLATED'?'CROSS':'ISOLATED';
+      return await kcPrivate('POST','/api/v1/orders',{...body,marginMode:alt}); }catch(_){}
+    const b2={...body}; delete b2.marginMode;
     return await kcPrivate('POST','/api/v1/orders',b2); } }
 function exPlaceLimit(intent){
   return placeOrderSmart({clientOid:intent.clientOid,symbol:intent.symbol,
@@ -412,7 +420,13 @@ function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
   const stepPct=wide?Math.max(0.12,c.gridStepPct)*4:addStepPct();
   const qty=contractsForLevel(center),grid=[],n=Math.max(1,c.levels);
   const entry=S.position?S.position.entry:center;
-  const from=c.direction==='short'?Math.max(center,entry):Math.min(center,entry);
+  // السلم يمتد للخارج فقط: لا تسليح أبدًا داخل منطقة سبق الدخول فيها —
+  // آخر منطقة دخول + خطوة كاملة هو الحد الأدنى للمستوى الجديد (يمنع تراكم الصفقات)
+  const fills=S.journal.filter(j=>j.status==='open').map(j=>j.entry).filter(v=>v>0);
+  let from=c.direction==='short'?Math.max(center,entry):Math.min(center,entry);
+  if(fills.length&&!wide){
+    if(c.direction==='short') from=Math.max(from,Math.max(...fills)*(1+step*0.8));
+    else from=Math.min(from,Math.min(...fills)*(1-step*0.8)); }
   for(let i=1;i<=n;i++){
     const raw=c.direction==='short'?from*(1+step*i):from*(1-step*i);
     const price=roundTick(raw,tick); if(!(price>0)) continue;
