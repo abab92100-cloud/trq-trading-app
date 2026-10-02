@@ -535,6 +535,8 @@ function inAddZone(p){ if(S.status!=='running'||!p) return false;
   const mom=S.confluence?S.confluence.momentum:0;
   const r=S.regime||{trend:'range'};
   const against=(pos.side==='long'&&r.trend==='down')||(pos.side==='short'&&r.trend==='up');
+  // صدمة معاكسة (اندفاع قوي ضد المركز): لا متوسطات أبدًا حتى يتوقف الاندفاع — حماية الرصيد أولًا
+  if(r.shock&&against) return false;
   if(against&&((pos.side==='long'&&mom<-0.06)||(pos.side==='short'&&mom>0.06))) return false;
   if(pos.side==='long'&&mom<-0.12) return false;
   if(pos.side==='short'&&mom>0.12) return false;
@@ -568,7 +570,11 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
                                   :(tp.trailBest-p)/tp.trailBest*100;
       // مسافة التتبع متكيفة مع التقلب الفعلي للسوق
       const vol=retStdev()||0.05;
-      const dist=Math.max(0.08,Math.min(0.35,vol*1.8));
+      let dist=Math.max(0.08,Math.min(0.35,vol*1.8));
+      // موجة قوية لصالحنا (اتجاه+صدمة متوافقان مع المركز): وسّع التتبع — دع الربح يركض
+      const rg=S.regime||{trend:'range'};
+      const aligned=(side==='long'&&rg.trend==='up')||(side==='short'&&rg.trend==='down');
+      if(aligned&&rg.shock) dist=Math.min(0.5,dist*1.4);
       if(retrace>=dist||net<=Math.max(0.02,notional*0.0004)) fillLevel(tp.id,p,true);
       continue; }
 
@@ -616,7 +622,12 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
 function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   const mag=Math.abs(S.biasScore);
   const stalled=S.lastWorkAt&&Date.now()-S.lastWorkAt>90000;
-  const scaled=base*(S.regime?S.regime.huntMult:1);
+  let scaled=base*(S.regime?S.regime.huntMult:1);
+  // اتجاه قوي نظيف متوافق مع اتجاه البوت — سهّل الاقتناص لاستغلال الموجة بدل تفويتها
+  const rg=S.regime;
+  if(rg){ const sh=S.config.direction==='short';
+    const aligned=(sh&&rg.trend==='down')||(!sh&&rg.trend==='up');
+    if(aligned&&!rg.shock) scaled*=0.8; }
   if(S.position&&S.position.side!==S.config.direction) return Math.max(0.08,scaled*0.4);
   if(stalled&&huntAligned()) return Math.max(0.12,scaled*0.55);
   if(mag>=28&&huntAligned()) return Math.max(0.14,scaled*0.75);

@@ -34,6 +34,33 @@ jobs:
           npx --yes cap add android
           npx --yes cap sync android
 
+      - name: Ensure stable signing keystore (same signature every build)
+        run: |
+          mkdir -p keystore
+          if [ ! -f keystore/debug.keystore ]; then
+            keytool -genkeypair -v -keystore keystore/debug.keystore -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -storepass android -keypass android -dname "CN=TRQ Trading,O=TRQ,C=SA"
+            git config user.name "TRQ Bot"
+            git config user.email "bot@trq.local"
+            git add keystore/debug.keystore
+            git commit -m "Add stable debug keystore [skip ci]"
+            git push
+          fi
+          cat >> android/app/build.gradle <<'GRADLE'
+
+          android {
+              signingConfigs {
+                  debug {
+                      storeFile file('../../keystore/debug.keystore')
+                      storePassword 'android'
+                      keyAlias 'androiddebugkey'
+                      keyPassword 'android'
+                  }
+              }
+          }
+          GRADLE
+
       - name: Add foreground keep-alive service (background trading)
         run: |
           mkdir -p android/app/src/main/java/com/trq/trading
