@@ -246,6 +246,16 @@ async function exPing(){
   return a?Number(a.accountEquity??a.availableBalance??0):null;
 }
 
+/* ---------- تدفق الشريط والحيتان — من صفقات المنصة المنفذة لحظيًا ---------- */
+function tapeFlow(){ const t=S.tape; if(!t||t.length<6) return {bias:0,whale:0,whaleVol:0};
+  let b=0,s=0; const sizes=t.map(x=>x.size).sort((x,y)=>x-y);
+  const med=sizes[Math.floor(sizes.length/2)]||1;
+  let wb=0,ws=0;
+  for(const x of t){ if(x.side==='buy')b+=x.size; else s+=x.size;
+    if(x.size>med*5){ if(x.side==='buy')wb+=x.size; else ws+=x.size; } } // طبعة حوت: 5× الوسيط
+  const tot=b+s||1, wtot=wb+ws||1;
+  return {bias:(b-s)/tot, whale:(wb-ws)/wtot, whaleVol:(wb+ws)/tot}; }
+
 /* ================================================================
    محرك القرار — شبكة + صيد + جني + انعكاس (مطابق للأصل)
    ================================================================ */
@@ -507,6 +517,10 @@ function inAddZone(p){ if(S.status!=='running'||!p) return false;
   if(against&&((pos.side==='long'&&mom<-0.06)||(pos.side==='short'&&mom>0.06))) return false;
   if(pos.side==='long'&&mom<-0.12) return false;
   if(pos.side==='short'&&mom>0.12) return false;
+  // فلتر الحيتان/التدفق: لا تزيد المركز عكس تدفق السيولة الكبيرة
+  const f=tapeFlow();
+  if(pos.side==='short'&&(f.whale>0.6||f.bias>0.45)) return false;
+  if(pos.side==='long'&&(f.whale<-0.6||f.bias<-0.45)) return false;
   return true; }
 function harvestRipe(p){ if(!p||S.status==='idle') return;
   for(const tp of S.grid.filter(g=>g.reduceOnly&&(g.status==='open'||g.status==='armed'))){
@@ -519,7 +533,9 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     const entryFee=lot?lot.fees:feeFor(tp.qty*(S.multiplier||1)*entry,false);
     const net=pnl-entryFee-exitFee;
     const stuck=!!(S.position&&adversePct(p)>=0.45);
-    const minNet=stuck?0.04:MIN_NET_USD;
+    // حد ربح حقيقي: لا صفقة تُغلق بصفر — على الأقل 0.12% من قيمة المركز صافيًا بعد الرسوم
+    const notional=tp.qty*(S.multiplier||1)*entry;
+    const minNet=Math.max(stuck?0.04:0.08, notional*0.0012);
 
     // ——— الجني الذكي المتحرك ———
     // ما دام السعر يتقدم لصالحنا نتبعه ونرفع الربح المقفل،
@@ -529,8 +545,10 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
       if(better) tp.trailBest=p;
       const retrace=side==='short'?(p-tp.trailBest)/tp.trailBest*100
                                   :(tp.trailBest-p)/tp.trailBest*100;
-      const dist=Math.max(0.05,Math.min(0.25,(S.config.gridStepPct||0.3)*0.35));
-      if(retrace>=dist||net<=0.01) fillLevel(tp.id,p,true);
+      // مسافة التتبع متكيفة مع التقلب الفعلي للسوق
+      const vol=retStdev()||0.05;
+      const dist=Math.max(0.08,Math.min(0.35,vol*1.8));
+      if(retrace>=dist||net<=Math.max(0.02,notional*0.0004)) fillLevel(tp.id,p,true);
       continue; }
 
     if(net<minNet) continue;
@@ -563,6 +581,10 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
     const against=(S.position.side==='short'&&S.biasScore>=12)||
       (S.position.side==='long'&&S.biasScore<=-12);
     if(against) return false; }
+  // فلتر الحيتان/التدفق: لا تدخل صفقة جديدة عكس تدفق السيولة الكبيرة
+  const f=tapeFlow();
+  if(f.whaleVol>0.25){ if(short&&f.whale>0.5) return false; if(!short&&f.whale<-0.5) return false; }
+  if(short&&f.bias>0.35) return false; if(!short&&f.bias<-0.35) return false;
   return true; }
 function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   const mag=Math.abs(S.biasScore);
@@ -656,6 +678,12 @@ function reversalAgainst(p){ if(!S.position) return false;
 function cancelPendingAdds(){ for(const g of S.grid){
   if(!g.reduceOnly&&(g.status==='armed'||g.status==='open')&&!g.filledAt){
     g.status='cancelled'; g.exchangeOrderId=null; } } }
+function circuitBreak(p){ if(!p||S.status!=='running') return;
+  const limit=Math.max(1.5,(S.config.cycleBalance||0)*0.04);
+  const cyc=(S.realizedPnl||0)+(S.position?S.position.unrealized:0)-(S.feesPaid||0);
+  if(cyc<=-limit){ flattenAt(p,'كابح الخسارة'); S.status='paused';
+    pushLog('error','كابح الخسارة: تجاوزت الدورة حد الخسارة المسموح — إيقاف مؤقت للحماية');
+    nativeNotify('TRQ ⚠️','كابح الخسارة: أُغلق المركز وأُوقف البوت مؤقتًا لحماية رأس المال'); } }
 function escapeAdverse(p){ if(S.status!=='running'||!S.position||!p) return;
   const danger=liqDanger(p), flip=reversalAgainst(p);
   if(!danger&&!flip) return;
@@ -864,6 +892,7 @@ async function botTick(){
     applyMeta(m);
     resolveDirection(Date.now());
     if(running&&price>0){
+      circuitBreak(price);
       escapeAdverse(price);
       harvestRipe(price);
       const due=S.grid.filter(l=>shouldFill(l,price));
