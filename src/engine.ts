@@ -444,11 +444,14 @@ function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
   const stepPct=wide?Math.max(0.12,c.gridStepPct)*4:addStepPct();
   const n=Math.max(1,c.levels);
   const qtys=levelQtys(center,n);
-  const filledN=S.journal.filter(j=>j.status==='open').length;
+  const filledN=filledAdds(); // عدد الأوامر الفعلية المملوءة (وليس صفوف الدفتر المدمجة) — حجم المستوى التالي يتبع ترتيبه الحقيقي
   const entry=S.position?S.position.entry:center;
   // السلم يمتد للخارج فقط: لا تسليح أبدًا داخل منطقة سبق الدخول فيها —
   // آخر منطقة دخول + خطوة كاملة هو الحد الأدنى للمستوى الجديد (يمنع تراكم الصفقات)
-  const fills=S.journal.filter(j=>j.status==='open').map(j=>j.entry).filter(v=>v>0);
+  // آخر منطقة دخول فعلية + خطوة كاملة هو الحد الأدنى للمستوى الجديد —
+  // أسعار التنفيذ الحقيقية من الشبكة، لا متوسط الدفتر المدمج الذي يتأخر خلف السعر
+  const fills=S.grid.filter(g=>!g.reduceOnly&&g.status==='filled')
+    .map(g=>g.filledPrice||g.price).filter(v=>v>0);
   let from=c.direction==='short'?Math.max(center,entry):Math.min(center,entry);
   if(fills.length&&!wide){
     if(c.direction==='short') from=Math.max(from,Math.max(...fills)*(1+step*0.8));
@@ -807,12 +810,15 @@ function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   if(stalled&&huntAligned()) return Math.max(0.12,scaled*0.55);
   if(mag>=28&&huntAligned()) return Math.max(0.14,scaled*0.75);
   return scaled; }
-function huntTooClose(p){ const need=Math.max(MIN_HUNT_GAP,effectiveHuntPct()*0.9);
-  for(const j of S.journal){ if(j.status!=='open'||j.source!=='صفقة') continue;
-    if(j.entry>0&&Math.abs(p-j.entry)/j.entry*100<need) return true; }
-  const last=[...S.grid].reverse().find(g=>g.origin==='hunt'&&g.status==='filled'&&!g.reduceOnly);
-  return !!(last&&last.price>0&&Math.abs(p-last.price)/last.price*100<need); }
-function openHuntLots(){ return S.journal.filter(j=>j.status==='open'&&j.source==='صفقة').length; }
+function huntTooClose(p){ const need=Math.max(MIN_HUNT_GAP,addStepPct(),effectiveHuntPct()*0.9);
+  // فحص كل دخول صيد فعلي على حدة — متوسط الدفتر المدمج كان يتأخر خلف السعر
+  // فتمر دخولات متلاصقة (0.02%!) بدعوى بُعدها عن المتوسط
+  for(const g of S.grid){ if(g.origin!=='hunt'||g.reduceOnly||g.status!=='filled') continue;
+    const fp=g.filledPrice||g.price;
+    if(fp>0&&Math.abs(p-fp)/fp*100<need) return true; }
+  return false; }
+function openHuntLots(){ // عدّ تنفيذات الصيد الفعلية — الصف المدمج واحد مهما ضمّ أوامر
+  return S.grid.filter(g=>g.origin==='hunt'&&!g.reduceOnly&&g.status==='filled').length; }
 function packHunt(p){ return {side:S.config.direction==='short'?'sell':'buy',qty:contractsForLevel(p)}; }
 function huntTrigger(p){ if(S.status!=='running'||!p) return null;
   const flipping=!!(S.position&&S.config.direction!==S.position.side);
