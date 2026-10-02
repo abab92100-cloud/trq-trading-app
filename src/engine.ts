@@ -131,6 +131,9 @@ function loadAll(){ try{
     cvd:rt.cvd||0,huntCount:rt.huntCount||0,lastPrice:rt.lastPrice??null,
     markPrice:rt.markPrice??null,activeCycle:rt.activeCycle||null,status:rt.status||'idle',
     history:rt.history||[],logs:rt.logs||[]}); }
+  // startedAt لا يُحفظ — الجلسة المستعادة تعمل تبدأ إحماءً قصيرًا جديدًا
+  // (وإلا بقي startedAt فارغًا فحُظر الصيد للأبد)
+  if(S.status==='running') S.startedAt=Date.now();
   const mem=JSON.parse(localStorage.getItem('trq:mem')||'null');
   if(mem&&mem.pairs) S.memory=mem;
 }catch(e){} }
@@ -405,13 +408,17 @@ function resolveDirection(now){ const mode=S.config.directionMode;
     return S.config.direction; }
   const prev=S.config.direction;
   if(S.regime&&S.regime.shock) return prev;
-  if(S.regime&&S.regime.trend==='up'&&bias.score>-6&&mom>-0.04){
-    if(prev!=='long') S._flipAt=now; S.config.direction='long'; return 'long'; }
-  if(S.regime&&S.regime.trend==='down'&&bias.score<6&&mom<0.04){
-    if(prev!=='short') S._flipAt=now; S.config.direction='short'; return 'short'; }
+  // لا تبديل اتجاه أكثر من مرة كل 60 ثانية — التقليب السريع كان يقطع الخاسر ويطارد الضجيج
+  const flipOk=!S._dirFlipAt||now-S._dirFlipAt>60000;
+  if(S.regime&&S.regime.trend==='up'&&bias.score>-6&&mom>-0.04&&!toxicDir('long')){
+    if(prev!=='long'){ if(!flipOk) return prev; S._dirFlipAt=now; }
+    S.config.direction='long'; return 'long'; }
+  if(S.regime&&S.regime.trend==='down'&&bias.score<6&&mom<0.04&&!toxicDir('short')){
+    if(prev!=='short'){ if(!flipOk) return prev; S._dirFlipAt=now; }
+    S.config.direction='short'; return 'short'; }
   if(Math.abs(bias.score)<4) return prev;
-  if(bias.direction!==prev&&(S._flipAt==null||now-S._flipAt>4000)&&Math.abs(bias.score)>=14){
-    S.config.direction=bias.direction; S._flipAt=now; }
+  if(bias.direction!==prev&&flipOk&&Math.abs(bias.score)>=14&&!toxicDir(bias.direction)){
+    S.config.direction=bias.direction; S._dirFlipAt=now; }
   else if(bias.direction===prev) S.config.direction=bias.direction;
   return S.config.direction;
 }
@@ -704,6 +711,7 @@ function fillLevel(id,fp,taker){ const l=S.grid.find(g=>g.id===id);
   notify((l.side==='sell'?'بيع ':'شراء ')+(l.origin==='hunt'?'صفقة':l.reduceOnly?'جني':'شبكة')+' @ '+fmtPx(fp),
     (l.reduceOnly&&d.closedQty>0)?'win':null); }
 function selectDueAdds(due,p){ if(addsBlocked()) return [];
+  if(toxicBlocked(S.config.direction)) return [];
   if(S.position&&!inAddZone(p)) return [];
   const adds=due.filter(l=>!l.reduceOnly&&!coveringLoser(l,p))
     .sort((a,b)=>Math.abs(a.price-p)-Math.abs(b.price-p));
@@ -847,15 +855,33 @@ function huntTooClose(p){ const need=Math.max(MIN_HUNT_GAP,addStepPct(),effectiv
   return false; }
 function openHuntLots(){ // عدّ تنفيذات الصيد الفعلية — الصف المدمج واحد مهما ضمّ أوامر
   return S.grid.filter(g=>g.origin==='hunt'&&!g.reduceOnly&&g.status==='filled').length; }
+// إحماء إلزامي: لا قرار دخول قبل 15 ثانية ووصول دفتر أوامر حقيقي وشريط صفقات —
+// الدفتر الفارغ كان يجتاز فحص الجودة تلقائيًا فيدخل البوت بعد 3 ثوانٍ من التشغيل أعمى
+function warmedUp(){ if(!S.startedAt||Date.now()-S.startedAt<15000) return false;
+  const b=S.orderBook||{}; if((b.bids||[]).length<5||(b.asks||[]).length<5) return false;
+  if((S.tape||[]).length<20) return false;
+  return true; }
+// اتجاه سام في الذاكرة القوية: عينة كافية + خسارة متراكمة + نجاح متدنٍ = حظر دخول —
+// الذاكرة كانت «تتعلم» دون أن تُجبر القرار فيعيد البوت الدخول في اتجاه خاسر متسلسل
+function toxicDir(dir){ const mem=S.memory; if(!mem||!mem.pairs) return false;
+  const r=mem.pairs[S.config.symbol+':'+dir];
+  return !!(r&&r.n>=6&&r.pnl<0&&(r.w/r.n)<0.35); }
+function toxicBlocked(dir){ if(!toxicDir(dir)) return false;
+  if(!S._toxicLogAt||Date.now()-S._toxicLogAt>300000){ S._toxicLogAt=Date.now();
+    pushLog('server','اتجاه سام في الذاكرة — الدخول '+(dir==='short'?'شورت':'لونغ')+' محظور حتى تتحسن النتائج'); }
+  return true; }
 function packHunt(p){ return {side:S.config.direction==='short'?'sell':'buy',qty:contractsForLevel(p)}; }
 function huntTrigger(p){ if(S.status!=='running'||!p) return null;
+  if(!warmedUp()) return null;
   const flipping=!!(S.position&&S.config.direction!==S.position.side);
   if(addsBlocked()&&!flipping) return null;
   if(flipping){ if(S.lastHuntAt&&Date.now()-S.lastHuntAt<120000) return null;
     // لا انقلاب فوري بعد دخول حديث — انتظر تأكيدًا (عمر المركز أو ضرر حقيقي)
     const ageOk=S.position&&Date.now()-(S.position.openedAt||0)>120000;
     if(!ageOk&&adversePct(p)<0.3) return null;
+    if(toxicBlocked(S.config.direction)) return null;
     return packHunt(p); }
+  if(toxicBlocked(S.config.direction)) return null;
   if(S.position){ if(!inAddZone(p)) return null; }
   else if(!huntAligned()) return null;
   if(S.startedAt&&Date.now()-S.startedAt<SCOUT_MS&&filledAdds()>=1) return null;
