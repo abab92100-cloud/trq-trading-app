@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   S, subscribe, initEngine, startBot, pauseBot, stopBot, newCycle,
   saveKeys, clearKeys, saveCfg, equity, desk, pulseAge, fmtPx, fmtUsd, fmtTime,
-  listContracts,
+  listContracts, memStepMult,
 } from './engine';
 import { streamState } from './ws';
 import Chart from './Chart';
@@ -247,6 +247,7 @@ function JournalScreen() {
         <h3>الذاكرة القوية — ما تعلّمه البوت (لا يُمسح أبدًا)</h3>
         <div className="subtle" style={{ fontSize: 10, marginBottom: 6 }}>
           {mem.cycles ? ('دورات مكتملة: ' + mem.cycles + ' · صافي متراكم: ' + fmtUsd(mem.totalPnl)) : 'ستتراكم هنا خبرة البوت من كل صفقة'}
+          {' · ضبط الخطوة الآن: ×' + memStepMult().toFixed(1)}
         </div>
         {memRows.map(([k, r]) => (
           <div className="log" key={k}>

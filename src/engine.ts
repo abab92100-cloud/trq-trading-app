@@ -370,10 +370,19 @@ function contractsForLevel(p){ const c=S.config;
   const per=Math.max(0,c.cycleBalance)*Math.max(1,c.leverage)/Math.max(1,c.levels);
   const raw=Math.max(1,Math.floor(per/cv));
   return Math.max(1,Math.floor(raw*(S.regime?S.regime.sizeMult:1))); }
-function addStepPct(){ return Math.max(0.12,S.config.gridStepPct)*(S.regime?S.regime.stepMult:1); }
+// مضاعف خطوة الشبكة المستمد من الذاكرة القوية:
+// زوج/اتجاه رابح تاريخيًا → خطوة أضيق (التقاط أكثر) · خاسر → خطوة أوسع (حذر أكبر)
+export function memStepMult(){ const mem=S.memory; if(!mem||!mem.pairs) return 1;
+  const r=mem.pairs[S.config.symbol+':'+S.config.direction];
+  if(!r||r.n<6) return 1;
+  const wr=r.w/r.n;
+  if(wr>=0.6&&r.pnl>0) return 0.8;
+  if(wr<0.4||r.pnl<0) return 1.4;
+  return 1; }
+function addStepPct(){ return Math.max(0.12,S.config.gridStepPct)*memStepMult()*(S.regime?S.regime.stepMult:1); }
 function tooClose(a,b,st){ return a>0&&b>0&&Math.abs(a-b)/Math.max(a,b)*100<st*0.55; }
 function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
-  const step=c.gridStepPct/100*(wide?4:(S.regime?S.regime.stepMult:1));
+  const step=c.gridStepPct/100*(wide?4:memStepMult()*(S.regime?S.regime.stepMult:1));
   const stepPct=wide?Math.max(0.12,c.gridStepPct)*4:addStepPct();
   const qty=contractsForLevel(center),grid=[],n=Math.max(1,c.levels);
   const entry=S.position?S.position.entry:center;
@@ -520,7 +529,7 @@ function inAddZone(p){ if(S.status!=='running'||!p) return false;
   if(lastJumpPct()>0.4) return false;
   if(!bookQuality()) return false;
   const pos=S.position; if(!pos||!pos.entry) return true;
-  const step=Math.max(0.12,S.config.gridStepPct);
+  const step=Math.max(0.12,S.config.gridStepPct*memStepMult());
   const improve=pos.side==='short'?(p-pos.entry)/pos.entry*100:(pos.entry-p)/pos.entry*100;
   if(improve<step*0.7) return false;
   const mom=S.confluence?S.confluence.momentum:0;
