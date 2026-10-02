@@ -415,10 +415,31 @@ export function memStepMult(){ const mem=S.memory; if(!mem||!mem.pairs) return 1
   return 1; }
 function addStepPct(){ return Math.max(0.12,S.config.gridStepPct)*memStepMult()*(S.regime?S.regime.stepMult:1); }
 function tooClose(a,b,st){ return a>0&&b>0&&Math.abs(a-b)/Math.max(a,b)*100<st*0.55; }
+// أحجام متدرجة: كل منطقة دخول أكبر من سابقتها حتى يكون تعديل المتوسط فعّالًا —
+// وإلا صار مجموع العقود السابقة أكبر من عقد التعديل فيصبح التعديل شبه معدوم
+function levelQtys(center,n){ const c=S.config;
+  const cv=Math.max(1e-12,(S.multiplier||1)*center);
+  const total=Math.max(0,c.cycleBalance)*Math.max(1,c.leverage)
+    *(S.regime?S.regime.sizeMult:1)*memSizeMult();
+  const used=S.journal.filter(j=>j.status==='open')
+    .reduce((a,j)=>a+j.qty*(S.multiplier||1)*j.entry,0);
+  const budget=Math.max(0,total-used);
+  const G=1.4; let sum=0; for(let i=0;i<n;i++) sum+=Math.pow(G,i);
+  const base=Math.max(1,Math.floor(budget/cv/Math.max(1,sum)));
+  const out=[]; let acc=0;
+  for(let i=0;i<n;i++){ const q=Math.max(1,Math.floor(base*Math.pow(G,i)));
+    if(acc+q*cv>budget&&out.length) break; // لا تتجاوز ميزانية الرافعة أبدًا
+    out.push(q); acc+=q*cv; }
+  return out; }
 function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
-  const step=c.gridStepPct/100*(wide?4:memStepMult()*(S.regime?S.regime.stepMult:1));
+  // خطوة متكيفة مع التقلب اللحظي: الحركات المفاجئة توسّع المناطق تلقائيًا
+  const vol=retStdev()||0.05;
+  const volF=wide?1:Math.max(1,Math.min(3,vol*10));
+  const step=c.gridStepPct/100*(wide?4:memStepMult()*(S.regime?S.regime.stepMult:1)*volF);
   const stepPct=wide?Math.max(0.12,c.gridStepPct)*4:addStepPct();
-  const qty=contractsForLevel(center),grid=[],n=Math.max(1,c.levels);
+  const n=Math.max(1,c.levels);
+  const qtys=levelQtys(center,n);
+  const filledN=S.journal.filter(j=>j.status==='open').length;
   const entry=S.position?S.position.entry:center;
   // السلم يمتد للخارج فقط: لا تسليح أبدًا داخل منطقة سبق الدخول فيها —
   // آخر منطقة دخول + خطوة كاملة هو الحد الأدنى للمستوى الجديد (يمنع تراكم الصفقات)
@@ -427,12 +448,19 @@ function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
   if(fills.length&&!wide){
     if(c.direction==='short') from=Math.max(from,Math.max(...fills)*(1+step*0.8));
     else from=Math.min(from,Math.min(...fills)*(1-step*0.8)); }
+  const grid=[];
+  const G=1.5, maxDist=Math.max(step*6,0.025); // سقف امتداد السلم الكلي
   for(let i=1;i<=n;i++){
-    const raw=c.direction==='short'?from*(1+step*i):from*(1-step*i);
+    // مسافات متسارعة (هندسية): كل منطقة أبعد من سابقتها — لا أوامر متراصة عديمة الجدوى
+    const dist=wide?step*i:Math.min(maxDist,step*(Math.pow(G,i)-1)/(G-1));
+    const raw=c.direction==='short'?from*(1+dist):from*(1-dist);
     const price=roundTick(raw,tick); if(!(price>0)) continue;
     if(grid.some(g=>tooClose(g.price,price,stepPct))) continue;
     if(c.direction==='short'&&price<=center*(1+step*0.4)) continue;
     if(c.direction==='long'&&price>=center*(1-step*0.4)) continue;
+    // حجم المستوى يتبع ترتيبه الحقيقي في السلم (بعد المناطق المملوءة)
+    const qi=Math.min(filledN+i-1,qtys.length-1);
+    const qty=qtys.length?qtys[Math.max(0,qi)]:contractsForLevel(center);
     grid.push({id:uid('lvl'),clientOid:uid('oid'),
       side:c.direction==='short'?'sell':'buy',price,qty,status:'armed',
       reduceOnly:false,exchangeOrderId:null,filledAt:null,origin:'grid',createdAt:Date.now()});
@@ -851,7 +879,14 @@ function circuitBreak(p){ if(!p||S.status!=='running') return;
     notify('كابح الخسارة: أُغلق المركز وأُوقف البوت مؤقتًا لحماية رأس المال','warn'); } }
 function escapeAdverse(p){ if(S.status!=='running'||!S.position||!p) return;
   const danger=liqDanger(p), flip=reversalAgainst(p);
-  if(!danger&&!flip) return;
+  // موجة سيولة عكسية قوية: حيتان + زخم ضد المركز معًا = انعكاس حقيقي —
+  // اقلب فورًا: شبكة تحمي القديم وشبكة تركب الموجة الجديدة (لا إهمال للمركز ولا تفويت للاتجاه)
+  const f=tapeFlow(), pos=S.position;
+  const mom=S.confluence?S.confluence.momentum:0;
+  const whaleWave=f.whaleVol>0.28&&(
+    (pos.side==='short'&&f.whale>0.5&&mom>0.08)||
+    (pos.side==='long'&&f.whale<-0.5&&mom<-0.08));
+  if(!danger&&!flip&&!whaleWave) return;
   const cooled=S._flipAt&&Date.now()-S._flipAt<45000;
   if(cooled&&!danger) return;
   const was=S.position.side, nextSide=was==='long'?'short':'long';
