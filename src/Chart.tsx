@@ -31,24 +31,26 @@ export default function Chart() {
     let alive = true;
     const key = S.config.symbol + ':' + gran;
     // عند تبديل الفريم: امسح شموع الفريم السابق فورًا حتى لا تُرسم تحت تسمية فريم مختلف
-    dataRef.current = { key, candles: kCache[key] || [], loading: true, fails: 0 };
+    dataRef.current = { key, candles: kCache[key] || [], loading: false, fails: 0 };
     forceDraw(n => n + 1);
     const load = () => {
+      if (dataRef.current.loading) return; // لا طلبات متراكبة — تكديس الطلبات يستدعي حظر المعدل
       dataRef.current.loading = true;
       fetchKlines(S.config.symbol, gran).then(k => {
         if (!alive) return;
         if (!k.length) throw new Error('empty');
         const cs = k.slice(-DATA_CAP);
         kCache[key] = cs;
-        dataRef.current = { key, candles: cs, loading: false, fails: 0 };
+        dataRef.current = { key, candles: cs, loading: false, fails: 0, at: Date.now() };
         if (typeof window !== 'undefined') window.__chartDbg = { key, n: cs.length, first: cs[0] && cs[0].t, last: cs.length && cs[cs.length - 1].t, at: Date.now() };
         forceDraw(n => n + 1); // البيانات وصلت — أعد الرسم فورًا ولا تنتظر نبضة سعر
       }).catch(() => {
         if (!alive) return;
         const f = (dataRef.current.fails || 0) + 1;
         dataRef.current.loading = false; dataRef.current.fails = f;
-        // فشل متكرر = اتصال مقطوع — إعادة محاولة سريعة بدل الانتظار الطويل
-        if (f >= 2) setTimeout(() => { if (alive) load(); }, 4000);
+        // تراجع تصاعدي عند تكرار الفشل — الضغط الأعمى يستدعي حظر 429 من المنصة فيتجمد الشارت
+        const wait = Math.min(60000, 4000 * Math.pow(2, Math.max(0, f - 1)));
+        setTimeout(() => { if (alive) load(); }, wait);
       });
     };
     load();
@@ -76,10 +78,15 @@ export default function Chart() {
     if (candles.length && p > 0) {
       const nowStart = Math.floor(Date.now() / granMs) * granMs;
       const last = candles[candles.length - 1];
-      if (last.t === nowStart) {
-        candles = candles.slice(0, -1).concat([{ ...last, c: p, h: Math.max(last.h, p), l: Math.min(last.l, p) }]);
-      } else if (nowStart > last.t) {
-        candles.push({ t: nowStart, o: last.c, h: Math.max(last.c, p), l: Math.min(last.c, p), c: p, v: 0 });
+      // حارس ضد الشمعة الوهمية: لا ندمج/نُلحق إلا سعرًا قريبًا من آخر إغلاق (±3%) وبيانات غير متجمدة
+      const dev = last.c > 0 ? Math.abs(p - last.c) / last.c : 1;
+      const fresh = nowStart - last.t <= granMs * 2;
+      if (dev <= 0.03 && fresh) {
+        if (last.t === nowStart) {
+          candles = candles.slice(0, -1).concat([{ ...last, c: p, h: Math.max(last.h, p), l: Math.min(last.l, p) }]);
+        } else if (nowStart > last.t) {
+          candles.push({ t: nowStart, o: last.c, h: Math.max(last.c, p), l: Math.min(last.c, p), c: p, v: 0 });
+        }
       }
     }
     if (candles.length < 2) {
@@ -91,7 +98,7 @@ export default function Chart() {
     // نطاق السعر — أساسه الشموع والسعر الحي فقط؛ المتوسط/التصفية يُرسمان فقط إن وقعا داخل النطاق
     let lo = Infinity, hi = -Infinity;
     for (const k of candles) { if (k.l < lo) lo = k.l; if (k.h > hi) hi = k.h; }
-    if (p) { lo = Math.min(lo, p); hi = Math.max(hi, p); }
+    if (p) { const mid = (lo + hi) / 2; if (mid > 0 && Math.abs(p - mid) / mid <= 0.03) { lo = Math.min(lo, p); hi = Math.max(hi, p); } }
     const pad = (hi - lo) * 0.06 || hi * 0.002 || 1;
     lo -= pad; hi += pad;
     const inRange = v => v > 0 && v >= lo && v <= hi;

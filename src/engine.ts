@@ -713,7 +713,7 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     const stuck=!!(S.position&&adversePct(p)>=0.45);
     // حد ربح حقيقي: لا صفقة تُغلق بمبالغ تافهة — على الأقل 0.15% من قيمة المركز صافيًا بعد الرسوم
     const notional=tp.qty*(S.multiplier||1)*entry;
-    const minNet=Math.max(stuck?0.08:0.12, notional*0.0015);
+    const minNet=Math.max(stuck?0.10:0.15, notional*0.003);
 
     // ——— الجني الذكي المتحرك ———
     // ما دام السعر يتقدم لصالحنا نتبعه ونرفع الربح المقفل،
@@ -733,7 +733,7 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
       // انحراف حيتان ضد المركز أثناء التتبع = انعكاس وشيك — ضيّق التتبع واقفل الربح بسرعة
       const dv=cvdDivergence();
       if((side==='short'&&dv===1)||(side==='long'&&dv===-1)) dist*=0.6;
-      if(retrace>=dist||net<=Math.max(0.06,notional*0.0006)) fillLevel(tp.id,p,true);
+      if(retrace>=dist||net<=Math.max(0.08,notional*0.0008)) fillLevel(tp.id,p,true);
       continue; }
 
     if(net<minNet) continue;
