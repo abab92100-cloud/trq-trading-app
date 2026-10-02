@@ -275,6 +275,11 @@ function exPlaceMarket(symbol,side,qty){
     symbol,side,type:'market',size:qty,leverage:String(S.config.leverage),marginMode:'ISOLATED'});
 }
 const exCancelAll = symbol => kcPrivate('DELETE','/api/v1/orders?symbol='+encodeURIComponent(symbol)).catch(()=>{});
+const exCancelOne = id => kcPrivate('DELETE','/api/v1/orders/'+id).catch(()=>{});
+// إغلاق حقيقي بكمية محددة — جني ربح فعلي على المنصة (سعر السوق، تخفيض فقط)
+function exCloseQty(symbol,side,qty){
+  return kcPrivate('POST','/api/v1/orders',{clientOid:'cls_'+Date.now().toString(36)+Math.floor(Math.random()*1000),
+    symbol,type:'market',side:side==='short'?'buy':'sell',size:qty,reduceOnly:true}); }
 function exClose(symbol,side){
   return kcPrivate('POST','/api/v1/orders',{clientOid:'cls_'+Date.now().toString(36),
     symbol,type:'market',side:side==='short'?'buy':'sell',closeOrder:true,reduceOnly:true});
@@ -648,7 +653,21 @@ function fillLevel(id,fp,taker){ const l=S.grid.find(g=>g.id===id);
     const parent=S.grid.find(g=>!g.reduceOnly&&g.status==='filled'&&
       (l.lotId?g.lotId===l.lotId:g.origin===l.origin));
     if(parent) parent.status='cancelled';
-    S.huntAnchor=fp; S.lastHuntAt=Date.now()-400; }
+    S.huntAnchor=fp; S.lastHuntAt=Date.now()-400;
+    // ——— الجني الحقيقي على المنصة ———
+    // الإغلاق المحلي وحده لا يحرّك المركز الفعلي — أغلق الكمية حقيقةً وألغِ أمر الجني المحدد
+    if(l.reduceOnly&&S.config.mode==='live'&&S.keys){
+      const row2=l.lotId?S.journal.find(j=>j.id===l.lotId):null;
+      const cSide=row2?row2.side:(S.position?S.position.side:S.config.direction);
+      if(l.exchangeOrderId) exCancelOne(l.exchangeOrderId);
+      exCloseQty(S.config.symbol,cSide,d.closedQty)
+        .catch(e=>pushLog('error','إغلاق الجني الحقيقي فشل: '+(e.message||e)));
+      // اكتمل المركز بالكامل؟ — ألغِ كل الأوامر المعلقة (منصة وبوت) وابدأ دراسة دخول جديدة نظيفة
+      if(!S.position){ exCancelAll(S.config.symbol).catch(()=>{});
+        for(const g of S.grid){ if(g.status==='armed'||g.status==='open'){
+          g.status='cancelled'; g.exchangeOrderId=null; } }
+        S.gridAnchor=null; S.huntAnchor=fp;
+        pushLog('server','جني مكتمل ✓ — أُغلقت الصفقة حقيقيًا وأُلغيت أوامرها، تُدرس صفقة جديدة'); } } }
   if(S.position&&S.status==='running') syncPositionTp();
   S.lastWorkAt=Date.now();
   notify((l.side==='sell'?'بيع ':'شراء ')+(l.origin==='hunt'?'صفقة':l.reduceOnly?'جني':'شبكة')+' @ '+fmtPx(fp),
@@ -819,6 +838,10 @@ function maybeHunt(p){ const hit=huntTrigger(p); if(!hit) return false;
   S.lastHuntAt=Date.now(); S.huntAnchor=p;
   const fee=feeFor(hit.qty*(S.multiplier||1)*p,true); S.feesPaid+=fee;
   const d=applyDelta(hit.side,hit.qty,p);
+  // الوضع الحقيقي: نفّذ صفقة الصيد فعليًا على المنصة بسعر السوق — لا اكتفاء بالتسجيل المحلي
+  if(d.addedQty>0&&S.config.mode==='live'&&S.keys){
+    exPlaceMarket(S.config.symbol,hit.side,d.addedQty)
+      .catch(e=>pushLog('error','صفقة الصيد الحقيقية فشلت: '+(e.message||e))); }
   if(d.closedQty>0){ const of=S.journal.find(j=>j.status==='open')?.fees||0;
     noteClose(d.closedQty,p,fee,'صفقة',d.realized-of-fee); S.huntOpen=Math.max(0,(S.huntOpen||0)-1); }
   if(d.addedQty>0){ S.huntCount++; S.huntOpen=(S.huntOpen||0)+1;
@@ -945,6 +968,11 @@ function ensureGrid(){ if(S.status!=='running') return;
     keep.includes(g)||g.reduceOnly||g.status!=='armed'||!shouldFill(g,center));
   S.gridAnchor=center; S.grid.sort((a,b)=>b.price-a.price); }
 function flattenAt(p,source){ const pos=S.position;
+  // إغلاق حقيقي على المنصة أولًا — لا إغلاق محلي صوري في الوضع الحقيقي
+  if(pos&&S.config.mode==='live'&&S.keys){
+    exCancelAll(S.config.symbol).catch(()=>{});
+    exCloseQty(S.config.symbol,pos.side,pos.size)
+      .catch(e=>pushLog('error','الإغلاق الحقيقي فشل: '+(e.message||e))); }
   if(pos&&p>0){ const cs=pos.side==='short'?'buy':'sell';
     const fee=feeFor(pos.size*(S.multiplier||1)*p,true); S.feesPaid+=fee;
     const d=applyDelta(cs,pos.size,p);
@@ -1048,13 +1076,21 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
     const exs=await exOrders(sym);
     const byOid=new Map(exs.map(o=>[o.clientOid||'',o]));
     const byId=new Map(exs.map(o=>[o.orderId,o]));
-    for(const l of S.grid){ const hit=(l.clientOid&&byOid.get(l.clientOid))||
+    for(const l of S.grid){ if(l.status==='cancelled'||l.status==='filled') continue;
+      const hit=(l.clientOid&&byOid.get(l.clientOid))||
       (l.exchangeOrderId&&byId.get(l.exchangeOrderId));
       if(hit){ l.status='open'; l.exchangeOrderId=hit.orderId; }
       else if(l.status==='open'&&!shouldFill(l,S.lastPrice||0)){
         l.status='armed'; l.exchangeOrderId=null; } }
+    // أي مستوى أُلغي أو نُفّذ محليًا وله أمر حي على المنصة — ألغِه هناك فورًا
+    for(const l of S.grid){ if((l.status==='cancelled'||l.status==='filled')&&l.exchangeOrderId){
+      exCancelOne(l.exchangeOrderId); l.exchangeOrderId=null; } }
+    // أوامر المنصة غير المعروفة محليًا: تُستورد فقط عند إقلاع بلا شبكة (استعادة بعد إعادة تشغيل)
+    // — وإلا فهي أوامر يتيمة قديمة يحذفها خط التنظيف أدناه بدل إحيائها
+    const hasLocalLive=S.grid.some(l=>(l.status==='armed'||l.status==='open'));
     for(const o of exs){ if(S.grid.some(l=>l.exchangeOrderId===o.orderId||
       (o.clientOid&&l.clientOid===o.clientOid))) continue;
+      if(hasLocalLive) continue;
       S.grid.push({id:uid('ex'),clientOid:o.clientOid||uid('oid'),side:o.side,
         price:o.price,qty:o.size,status:'open',reduceOnly:o.reduceOnly,
         exchangeOrderId:o.orderId,filledAt:null,origin:'grid'}); }
