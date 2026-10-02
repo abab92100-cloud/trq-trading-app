@@ -469,11 +469,17 @@ function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
     else from=Math.min(from,Math.min(...fills)*(1-step*0.8)); }
   const grid=[];
   const G=1.5, maxDist=Math.max(step*6,0.025); // سقف امتداد السلم الكلي
+  const liq=S.liqPrice||(S.position&&S.position.liquidation)||0;
   for(let i=1;i<=n;i++){
     // مسافات متسارعة (هندسية): كل منطقة أبعد من سابقتها — لا أوامر متراصة عديمة الجدوى
-    const dist=wide?step*i:Math.min(maxDist,step*(Math.pow(G,i)-1)/(G-1));
+    // الشبكة الواسعة أيضًا لها سقف (5%) — الامتداد المفتوح كان يسلّح مستويات على بعد 30%
+    const dist=wide?Math.min(step*i,0.05):Math.min(maxDist,step*(Math.pow(G,i)-1)/(G-1));
     const raw=c.direction==='short'?from*(1+dist):from*(1-dist);
     const price=roundTick(raw,tick); if(!(price>0)) continue;
+    // لا تسليح في آخر 1.5% قبل التصفية (متوافق مع حد الخطر) —
+    // مستوى لن يعيش المركز ليراه عبء أعمى، لكن بقية المسافة صالحة للتسليح
+    if(liq>0){ if(c.direction==='short'&&price>=liq*0.985) continue;
+      if(c.direction==='long'&&price<=liq*1.015) continue; }
     if(grid.some(g=>tooClose(g.price,price,stepPct))) continue;
     if(c.direction==='short'&&price<=center*(1+step*0.4)) continue;
     if(c.direction==='long'&&price>=center*(1-step*0.4)) continue;
@@ -626,13 +632,15 @@ function maybeReport(){ const now=Date.now();
   S._lastReportAt=now;
   const msg='صفقات متعلَّمة: '+st.n+' · نجاح '+(st.winRate*100).toFixed(0)+'% · عامل الربح '+st.pf+' · صافي الذاكرة '+fmtUsd(st.pnl);
   pushLog('info','تقرير دوري — '+msg); nativeNotify('TRQ — تقرير الأداء',msg); }
-function placeTpOpposite(f){ if(S.status!=='running') return;
-  const notional=Math.max(1e-9,f.qty*(S.multiplier||1)*f.price);
+function tpTargetPrice(side,price,qty,origin){
+  const notional=Math.max(1e-9,qty*(S.multiplier||1)*price);
   const cover=(S.makerFee+S.takerFee+MIN_NET_USD/notional)*100;
-  const px=S.lastPrice||f.price;
+  const px=S.lastPrice||price;
   const uw=!!(S.position&&adversePct(px)>=0.35);
-  const st=(uw?Math.max(0.04,cover*0.5):Math.max(cover,f.origin==='hunt'?0.22:0.24))/100;
-  const tp=f.side==='sell'?roundTick(f.price*(1-st),S.tickSize):roundTick(f.price*(1+st),S.tickSize);
+  const st=(uw?Math.max(0.04,cover*0.5):Math.max(cover,origin==='hunt'?0.22:0.24))/100;
+  return side==='sell'?roundTick(price*(1-st),S.tickSize):roundTick(price*(1+st),S.tickSize); }
+function placeTpOpposite(f){ if(S.status!=='running') return;
+  const tp=tpTargetPrice(f.side,f.price,f.qty,f.origin);
   if(S.grid.some(g=>(g.status==='armed'||g.status==='open')&&g.reduceOnly&&
     Math.abs(g.price-tp)/tp<1e-6)) return;
   S.grid.push({id:uid('tp'),clientOid:uid('oid'),side:f.side==='sell'?'buy':'sell',
@@ -640,10 +648,19 @@ function placeTpOpposite(f){ if(S.status!=='running') return;
     filledAt:null,origin:f.origin||'grid',createdAt:Date.now(),lotId:f.lotId});
   S.grid.sort((a,b)=>b.price-a.price); }
 function syncPositionTp(){ if(S.status!=='running'||!S.position) return;
-  for(const g of S.grid) if(g.reduceOnly&&(g.status==='armed'||g.status==='open')){
-    g.status='cancelled'; g.exchangeOrderId=null; }
-  placeTpOpposite({side:S.position.side==='short'?'sell':'buy',price:S.position.entry,
-    qty:S.position.size,origin:'grid',lotId:S.journal.find(j=>j.status==='open')?.id}); }
+  const pos=S.position;
+  const fSide=pos.side==='short'?'sell':'buy';
+  const want=tpTargetPrice(fSide,pos.entry,pos.size,'grid');
+  const tickTol=S.tickSize>0?S.tickSize*0.5:Math.abs(want)*1e-9;
+  const liveTp=S.grid.filter(g=>g.reduceOnly&&(g.status==='armed'||g.status==='open'));
+  const match=liveTp.find(g=>Math.abs(g.price-want)<=tickTol&&g.qty===pos.size);
+  // لا هدم وإعادة بناء كل نبضة: الأمر المطابق يبقى، ويُلغى غيره فقط —
+  // الهدم الدائم كان يراكم آلاف الأوامر الملغاة ويرسل إلغاءات للمنصة بلا توقف
+  if(match){ for(const g of liveTp){ if(g!==match){ g.status='cancelled'; g.exchangeOrderId=null; } }
+    return; }
+  for(const g of liveTp){ g.status='cancelled'; g.exchangeOrderId=null; }
+  placeTpOpposite({side:fSide,price:pos.entry,qty:pos.size,origin:'grid',
+    lotId:S.journal.find(j=>j.status==='open')?.id}); }
 function coveringLoser(l,p){ const pos=S.position; if(!pos||l.reduceOnly) return false;
   const cover=(pos.side==='short'&&l.side==='buy')||(pos.side==='long'&&l.side==='sell');
   return cover&&adversePct(p)>0.08; }
@@ -835,6 +852,9 @@ function huntTrigger(p){ if(S.status!=='running'||!p) return null;
   const flipping=!!(S.position&&S.config.direction!==S.position.side);
   if(addsBlocked()&&!flipping) return null;
   if(flipping){ if(S.lastHuntAt&&Date.now()-S.lastHuntAt<120000) return null;
+    // لا انقلاب فوري بعد دخول حديث — انتظر تأكيدًا (عمر المركز أو ضرر حقيقي)
+    const ageOk=S.position&&Date.now()-(S.position.openedAt||0)>120000;
+    if(!ageOk&&adversePct(p)<0.3) return null;
     return packHunt(p); }
   if(S.position){ if(!inAddZone(p)) return null; }
   else if(!huntAligned()) return null;
@@ -923,9 +943,17 @@ function escapeAdverse(p){ if(S.status!=='running'||!S.position||!p) return;
   // اقلب فورًا: شبكة تحمي القديم وشبكة تركب الموجة الجديدة (لا إهمال للمركز ولا تفويت للاتجاه)
   const f=tapeFlow(), pos=S.position;
   const mom=S.confluence?S.confluence.momentum:0;
-  const whaleWave=f.whaleVol>0.28&&(
+  const whaleRaw=f.whaleVol>0.28&&(
     (pos.side==='short'&&f.whale>0.5&&mom>0.08)||
     (pos.side==='long'&&f.whale<-0.5&&mom<-0.08));
+  // طبعة واحدة لا تصنع موجة: اشترط استمرار الإشارة 5 نبضات متتالية —
+  // وإلا انقلب البوت على ضجيج عابر وباع القاع واشترى القمة
+  S._waveN=whaleRaw?(S._waveN||0)+1:0;
+  const posAge=Date.now()-(pos.openedAt||0);
+  const adv=adversePct(p);
+  const whaleWave=S._waveN>=5&&(posAge>120000||adv>=0.35||(S.regime&&S.regime.shock));
+  if(whaleRaw&&!whaleWave&&S._waveN===5&&(!S._waveLogAt||Date.now()-S._waveLogAt>60000)){
+    S._waveLogAt=Date.now(); pushLog('server','موجة حيتان مبكرة — تُراقب ولا انقلاب (مركز حديث بلا ضرر حقيقي)'); }
   if(!danger&&!flip&&!whaleWave) return;
   const cooled=S._flipAt&&Date.now()-S._flipAt<45000;
   if(cooled&&!danger) return;
@@ -952,6 +980,10 @@ function escapeAdverse(p){ if(S.status!=='running'||!S.position||!p) return;
   pushLog('server','تغيّر الاتجاه — دخول '+(nextSide==='short'?'شورت':'لونغ')+
     ' فوراً بشبكتين واسعتين'); }
 function ensureGrid(){ if(S.status!=='running') return;
+  // تنظيف: آلاف الصفوف الملغاة القديمة تُفرز وتُفحص كل نبضة — احتفظ بآخر 100 فقط
+  if(S.grid.length>400){ let dead=0;
+    S.grid=S.grid.filter(g=>{ if(g.status==='armed'||g.status==='open'||g.status==='filled') return true;
+      dead++; return dead<=100; }); }
   const center=S.lastPrice||S.gridAnchor||(S.position?S.position.entry:0);
   if(!center) return;
   sanitizeAdds();
