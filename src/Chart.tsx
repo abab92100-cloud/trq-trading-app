@@ -22,14 +22,18 @@ export default function Chart() {
   const ref = useRef(null);
   const [gran, setGran] = useState(1);
   const [viewN, setViewN] = useState(MAX_CANDLES); // عدد الشموع المعروض (تكبير/تصغير)
+  const [, forceDraw] = useState(0);               // إجبار إعادة الرسم فور وصول البيانات
   const pinch = useRef(null);
   const dataRef = useRef({ key: '', candles: kCache[S.config.symbol + ':1'] || [], loading: false });
 
   // جلب الشموع عند تغيير الزوج أو الإطار + تحديث دوري
   useEffect(() => {
     let alive = true;
+    const key = S.config.symbol + ':' + gran;
+    // عند تبديل الفريم: امسح شموع الفريم السابق فورًا حتى لا تُرسم تحت تسمية فريم مختلف
+    dataRef.current = { key, candles: kCache[key] || [], loading: true, fails: 0 };
+    forceDraw(n => n + 1);
     const load = () => {
-      const key = S.config.symbol + ':' + gran;
       dataRef.current.loading = true;
       fetchKlines(S.config.symbol, gran).then(k => {
         if (!alive) return;
@@ -38,6 +42,7 @@ export default function Chart() {
         kCache[key] = cs;
         dataRef.current = { key, candles: cs, loading: false, fails: 0 };
         if (typeof window !== 'undefined') window.__chartDbg = { key, n: cs.length, first: cs[0] && cs[0].t, last: cs.length && cs[cs.length - 1].t, at: Date.now() };
+        forceDraw(n => n + 1); // البيانات وصلت — أعد الرسم فورًا ولا تنتظر نبضة سعر
       }).catch(() => {
         if (!alive) return;
         const f = (dataRef.current.fails || 0) + 1;
@@ -61,8 +66,9 @@ export default function Chart() {
     const AXIS = 58, TOP = 6, BOT = 16;
     const plotW = W - AXIS - 8, plotH = H - TOP - BOT;
 
-    // دمج السعر الحي في آخر شمعة
-    let candles = dataRef.current.candles.slice(-viewN);
+    // دمج السعر الحي في آخر شمعة — فقط إذا كانت البيانات للفريم الحالي
+    const wantKey = S.config.symbol + ':' + gran;
+    let candles = dataRef.current.key === wantKey ? dataRef.current.candles.slice(-viewN) : [];
     const granMs = gran * 60000;
     const p = S.lastPrice;
     if (candles.length && p > 0) {

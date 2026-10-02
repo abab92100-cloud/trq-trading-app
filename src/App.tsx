@@ -239,12 +239,27 @@ function PosScreen() {
 /* ---------- السجل ---------- */
 function JournalScreen() {
   const rows = [...S.journal, ...(S.history || [])];
+  const mem = S.memory || { pairs: {}, cycles: 0, totalPnl: 0 };
+  const memRows = Object.entries(mem.pairs || {});
   return (
     <section>
       <div className="card">
-        <h3>سجل الصفقات — تراكمي عبر كل الدورات</h3>
-        <div>
-          {rows.length ? rows.slice(0, 60).map(j => {
+        <h3>الذاكرة القوية — ما تعلّمه البوت (لا يُمسح أبدًا)</h3>
+        <div className="subtle" style={{ fontSize: 10, marginBottom: 6 }}>
+          {mem.cycles ? ('دورات مكتملة: ' + mem.cycles + ' · صافي متراكم: ' + fmtUsd(mem.totalPnl)) : 'ستتراكم هنا خبرة البوت من كل صفقة'}
+        </div>
+        {memRows.map(([k, r]) => (
+          <div className="log" key={k}>
+            <span className={(r.pnl > 0 ? 'up' : r.pnl < 0 ? 'dn' : 'muted') + ' mono'}>{fmtUsd(r.pnl)}</span>
+            <span>{k.replace('USDTM:', '/').replace(':short', ' شورت').replace(':long', ' لونغ')}
+              <span className="subtle"> · نجاح {r.w}/{r.n}</span></span>
+          </div>
+        ))}
+      </div>
+      <div className="card">
+        <h3>سجل الصفقات</h3>
+        <div style={{ maxHeight: 320, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+          {rows.length ? rows.map(j => {
             const pnl = j.status === 'closed' ? j.pnl : (S.lastPrice ?
               ((j.side === 'short' ? 1 : -1) * (j.entry - S.lastPrice) * (S.multiplier || 1) * j.qty - j.fees) : 0);
             return (
@@ -262,8 +277,8 @@ function JournalScreen() {
       </div>
       <div className="card">
         <h3>سجل السيرفر</h3>
-        <div>
-          {S.logs.length ? S.logs.slice(0, 30).map(l => (
+        <div style={{ maxHeight: 320, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
+          {S.logs.length ? S.logs.map(l => (
             <div className="log" key={l.id}>
               <span className={l.kind === 'fill' ? 'lfill' : l.kind === 'error' ? 'lerr' : l.kind === 'recover' ? 'lrec' : 'muted'}>{l.text}</span>
               <span className="tm">{fmtTime(l.at)}</span>

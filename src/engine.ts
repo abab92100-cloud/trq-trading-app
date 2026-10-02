@@ -78,6 +78,7 @@ export const S = {
   orderBook:{bids:[],asks:[]}, startedAt:null, activeCycle:null,
   ignoreExchangeUntil:0, lastTickAt:null, sound:true, soundTone:'soft', permDenied:false,
   toastMsg:null, _metaAt:0, _lastTrailAt:0,
+  memory:{pairs:{},cycles:0,totalPnl:0}, // الذاكرة القوية — تبقى عبر الدورات ولا تُمسح أبدًا
 };
 
 /* ---------- التخزين ---------- */
@@ -91,6 +92,7 @@ function saveAll(){ try{
     lastPrice:S.lastPrice,markPrice:S.markPrice,activeCycle:S.activeCycle,status:S.status,
     history:S.history,logs:S.logs};
   localStorage.setItem('trq:rt',JSON.stringify(rt));
+  localStorage.setItem('trq:mem',JSON.stringify(S.memory||{pairs:{},cycles:0,totalPnl:0}));
 }catch(e){} }
 function loadAll(){ try{
   const cfg=JSON.parse(localStorage.getItem('trq:cfg')||'null'); if(cfg) S.config={...S.config,...cfg};
@@ -103,6 +105,8 @@ function loadAll(){ try{
     cvd:rt.cvd||0,huntCount:rt.huntCount||0,lastPrice:rt.lastPrice??null,
     markPrice:rt.markPrice??null,activeCycle:rt.activeCycle||null,status:rt.status||'idle',
     history:rt.history||[],logs:rt.logs||[]}); }
+  const mem=JSON.parse(localStorage.getItem('trq:mem')||'null');
+  if(mem&&mem.pairs) S.memory=mem;
 }catch(e){} }
 
 /* ---------- السجل ---------- */
@@ -453,7 +457,15 @@ function noteClose(qty,exit,fee,source,pnl,lotId){ const lotId_=lotId;
     mergedOrders:1,status:'closed'});
   if(S.activeCycle){ S.activeCycle.pnl+=pnl;
     if(!S.position){ S.activeCycle=null; } }
+  // تعلّم من نتيجة الصفقة — يُخزَّن في الذاكرة القوية التي لا تُمسح مع الدورات
+  learnTrade(row?row.side:(S.position?S.position.side:S.config.direction), pnl);
   return pnl; }
+function learnTrade(side,pnl){ if(!Number.isFinite(pnl)) return;
+  const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
+  const k=S.config.symbol+':'+(side||'short');
+  const r=mem.pairs[k]=mem.pairs[k]||{w:0,l:0,n:0,pnl:0};
+  r.n++; r.pnl=Math.round((r.pnl+pnl)*10000)/10000;
+  if(pnl>0) r.w++; else if(pnl<0) r.l++; }
 function placeTpOpposite(f){ if(S.status!=='running') return;
   const notional=Math.max(1e-9,f.qty*(S.multiplier||1)*f.price);
   const cover=(S.makerFee+S.takerFee+MIN_NET_USD/notional)*100;
@@ -585,6 +597,12 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
   const f=tapeFlow();
   if(f.whaleVol>0.25){ if(short&&f.whale>0.5) return false; if(!short&&f.whale<-0.5) return false; }
   if(short&&f.bias>0.35) return false; if(!short&&f.bias<-0.35) return false;
+  // بوابة الذاكرة القوية: اتجاه خاسر تاريخيًا على هذا الزوج يُحظر حتى تتحسن نتائجه
+  const mp=S.memory&&S.memory.pairs&&S.memory.pairs[S.config.symbol+':'+(short?'short':'long')];
+  if(mp&&mp.n>=6&&mp.pnl<0&&(mp.w/mp.n)<0.35){
+    if(!S._memBlockAt||Date.now()-S._memBlockAt>600000){ S._memBlockAt=Date.now();
+      pushLog('info','الذاكرة: اتجاه '+(short?'الشورت':'اللونغ')+' على هذا الزوج خاسر تاريخيًا ('+mp.w+'/'+mp.n+') — ممنوع مؤقتًا'); }
+    return false; }
   return true; }
 function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   const mag=Math.abs(S.biasScore);
@@ -956,16 +974,18 @@ export function newCycle(){ const rolled=Math.max(0.01,
     Math.round((S.config.cycleBalance+S.realizedPnl-S.feesPaid)*100)/100);
   const keep=S.status==='running'||S.status==='paused';
   if(S.config.mode==='live'&&S.keys) exCancelAll(S.config.symbol).catch(()=>{});
-  // أرشفة صفقات الدورة المنتهية بدل مسحها — السجل يبقى تراكميًا عبر الدورات
-  S.history=[...S.journal.filter(j=>j.status!=='open'),...S.history].slice(0,300);
+  // قبل المسح: الذاكرة القوية تتعلم حصيلة الدورة — وهي الوحيدة التي تبقى
+  const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
+  mem.cycles++; mem.totalPnl=Math.round((mem.totalPnl+S.realizedPnl-S.feesPaid)*100)/100;
   const cfg={...S.config,cycleBalance:rolled};
-  const keys=S.keys, snd=S.sound, tone=S.soundTone, hist=S.history, logs=S.logs;
-  Object.assign(S,{grid:[],position:null,journal:[],realizedPnl:0,feesPaid:0,
+  const keys=S.keys, snd=S.sound, tone=S.soundTone;
+  // مسح كامل: سجل الصفقات + الأرشيف + سجل السيرفر — بداية نظيفة كل دورة
+  Object.assign(S,{grid:[],position:null,journal:[],history:[],logs:[],realizedPnl:0,feesPaid:0,
     activeCycle:null,huntCount:0,huntOpen:0,priceTrail:[],emaFast:null,emaSlow:null,
     cvd:0,tape:[],orderBook:{bids:[],asks:[]},status:'idle',startedAt:null,
-    huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null});
-  S.config=cfg; S.keys=keys; S.sound=snd; S.soundTone=tone; S.history=hist; S.logs=logs;
-  pushLog('info','دورة جديدة — رصيد '+rolled.toFixed(2)+' — سجل الصفقات محفوظ');
+    huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null,_memBlockAt:0});
+  S.config=cfg; S.keys=keys; S.sound=snd; S.soundTone=tone; S.memory=mem;
+  pushLog('info','دورة جديدة برصيد $'+rolled.toFixed(2)+' — مُسحت السجلات وبقيت ذاكرة التعلم ('+mem.cycles+' دورة متعلَّمة)');
   toast('دورة جديدة برصيد $'+rolled.toFixed(2));
   emit(); saveAll(); if(keep) startBot(); }
 
