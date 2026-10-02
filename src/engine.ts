@@ -42,10 +42,29 @@ function beep(tone){ try{ const c=new (window.AudioContext||window.webkitAudioCo
   setTimeout(()=>{ try{c.close();}catch(e){} },800); }catch(e){} }
 /* إشعارات الجوال الأصلية — تعمل والتطبيق في الخلفية */
 function lnPlugin(){ try{ return window.Capacitor&&window.Capacitor.Plugins&&window.Capacitor.Plugins.LocalNotifications; }catch(e){ return null; } }
+let _channelsReady=false;
+function ensureChannels(LN){ if(_channelsReady||!LN.createChannel) return; _channelsReady=true;
+  // قناة تنبيهات عالية الأهمية: تظهر منبثقة مع صوت حتى والشاشة مقفلة
+  LN.createChannel({id:'trq_alerts',name:'تنبيهات TRQ',description:'صفقات وجني أرباح وتحذيرات',
+    importance:5,visibility:1,vibration:true,lights:true}).catch(()=>{});
+  // قناة حالة دائمة صامتة للإشعار المستمر
+  LN.createChannel({id:'trq_status',name:'حالة TRQ',description:'إشعار البقاء الدائم',
+    importance:2,visibility:-1,vibration:false}).catch(()=>{}); }
 function nativeNotify(title,body,ongoing){ const LN=lnPlugin(); if(!LN) return;
+  ensureChannels(LN);
   LN.requestPermissions().then(r=>{ if(r.display!=='granted') return;
     LN.schedule({notifications:[{id:ongoing?7:((Date.now()%2000000000)+10),
-      title,body,ongoing:!!ongoing,autoCancel:!ongoing}]}).catch(()=>{}); }).catch(()=>{}); }
+      title,body,ongoing:!!ongoing,autoCancel:!ongoing,
+      channelId:ongoing?'trq_status':'trq_alerts'}]}).catch(()=>{}); }).catch(()=>{}); }
+/* بقاء صوتي صامت — تشغيل تيار صوتي غير مسموع يمنع نظام الويب من خنق
+   مؤقتات المحرك وقناة الأسعار عند إطفاء الشاشة (السبب الأكبر لتوقف البوت) */
+let _kaCtx=null;
+export function startSilentKeepAlive(){ if(_kaCtx||!(typeof window!=='undefined'&&window.Capacitor)) return;
+  try{ const c=new (window.AudioContext||window.webkitAudioContext)(); _kaCtx=c;
+    const o=c.createOscillator(),g=c.createGain(); g.gain.value=0.0001;
+    o.frequency.value=18; o.connect(g); g.connect(c.destination); o.start();
+    setInterval(()=>{ if(_kaCtx&&_kaCtx.state!=='running') _kaCtx.resume().catch(()=>{}); },15000);
+  }catch(e){} }
 function clearNativeOngoing(){ const LN=lnPlugin(); if(LN) LN.cancel({notifications:[{id:7}]}).catch(()=>{}); }
 function notify(txt,kind){ if(S.sound){
     // نغمة مميزة لكل حدث: ربح = نغمتان صاعدتان · تحذير = تنبيه قوي · عادي = النغمة المختارة
@@ -631,9 +650,9 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     const entryFee=lot?lot.fees:feeFor(tp.qty*(S.multiplier||1)*entry,false);
     const net=pnl-entryFee-exitFee;
     const stuck=!!(S.position&&adversePct(p)>=0.45);
-    // حد ربح حقيقي: لا صفقة تُغلق بصفر — على الأقل 0.12% من قيمة المركز صافيًا بعد الرسوم
+    // حد ربح حقيقي: لا صفقة تُغلق بمبالغ تافهة — على الأقل 0.15% من قيمة المركز صافيًا بعد الرسوم
     const notional=tp.qty*(S.multiplier||1)*entry;
-    const minNet=Math.max(stuck?0.04:0.08, notional*0.0012);
+    const minNet=Math.max(stuck?0.08:0.12, notional*0.0015);
 
     // ——— الجني الذكي المتحرك ———
     // ما دام السعر يتقدم لصالحنا نتبعه ونرفع الربح المقفل،
@@ -653,7 +672,7 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
       // انحراف حيتان ضد المركز أثناء التتبع = انعكاس وشيك — ضيّق التتبع واقفل الربح بسرعة
       const dv=cvdDivergence();
       if((side==='short'&&dv===1)||(side==='long'&&dv===-1)) dist*=0.6;
-      if(retrace>=dist||net<=Math.max(0.02,notional*0.0004)) fillLevel(tp.id,p,true);
+      if(retrace>=dist||net<=Math.max(0.06,notional*0.0006)) fillLevel(tp.id,p,true);
       continue; }
 
     if(net<minNet) continue;
@@ -1178,5 +1197,11 @@ export function initEngine(){
     exPing().then(eq=>{ if(eq!=null){ S.exEquity=eq; S.linkOk=true; } })
       .catch(()=>{ S.linkOk=false; }); };
   refreshBal(); setInterval(refreshBal,20000);
+  // البقاء الصوتي الصامت: يعمل دائمًا على الجوال حتى لا يُخنق المحرك بإطفاء الشاشة
+  startSilentKeepAlive();
+  // عند العودة من الخلفية: دورة محرك فورية لتعويض أي فترة خنق + إعادة فحص الأرباح الناضجة
+  if(typeof document!=='undefined') document.addEventListener('visibilitychange',()=>{
+    if(!document.hidden){ botTick().catch(()=>{});
+      if(S.lastPrice) try{ harvestRipe(S.lastPrice); }catch(e){} } });
   emit();
 }
