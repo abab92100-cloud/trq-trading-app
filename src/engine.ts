@@ -47,8 +47,13 @@ function nativeNotify(title,body,ongoing){ const LN=lnPlugin(); if(!LN) return;
     LN.schedule({notifications:[{id:ongoing?7:((Date.now()%2000000000)+10),
       title,body,ongoing:!!ongoing,autoCancel:!ongoing}]}).catch(()=>{}); }).catch(()=>{}); }
 function clearNativeOngoing(){ const LN=lnPlugin(); if(LN) LN.cancel({notifications:[{id:7}]}).catch(()=>{}); }
-function notify(txt){ if(S.sound){ beep(S.soundTone); try{navigator.vibrate&&navigator.vibrate(120);}catch(e){} }
-  pushLog('fill',txt); nativeNotify('TRQ Trading',txt); }
+function notify(txt,kind){ if(S.sound){
+    // نغمة مميزة لكل حدث: ربح = نغمتان صاعدتان · تحذير = تنبيه قوي · عادي = النغمة المختارة
+    if(kind==='win'){ beep(S.soundTone); setTimeout(()=>{ try{beep('bell');}catch(e){} },200); }
+    else if(kind==='warn'){ beep('alarm'); }
+    else beep(S.soundTone);
+    try{navigator.vibrate&&navigator.vibrate(kind==='win'?[80,60,140]:120);}catch(e){} }
+  pushLog(kind==='warn'?'error':'fill',txt); nativeNotify('TRQ Trading',txt); }
 
 /* ---------- مخزن الحالة + إشعارات الواجهة ---------- */
 const listeners=new Set();
@@ -57,7 +62,9 @@ export function subscribe(fn){ listeners.add(fn); return ()=>listeners.delete(fn
 export function emit(){ for(const fn of [...listeners]) fn(); }
 function emitThrottled(){
   if(emitTimer) return;
-  emitTimer=setTimeout(()=>{ emitTimer=null; emit(); },300);
+  // توفير البطارية: التطبيق في الخلفية = تحديثات واجهة أبطأ، والمحرك والتنفيذ بلا تغيير
+  const d=(typeof document!=='undefined'&&document.hidden)?1500:300;
+  emitTimer=setTimeout(()=>{ emitTimer=null; emit(); },d);
 }
 function toast(m){ S.toastMsg={text:m,at:Date.now()}; emit(); }
 
@@ -369,7 +376,7 @@ function contractsForLevel(p){ const c=S.config;
   const cv=Math.max(1e-12,(S.multiplier||1)*p);
   const per=Math.max(0,c.cycleBalance)*Math.max(1,c.leverage)/Math.max(1,c.levels);
   const raw=Math.max(1,Math.floor(per/cv));
-  return Math.max(1,Math.floor(raw*(S.regime?S.regime.sizeMult:1))); }
+  return Math.max(1,Math.floor(raw*(S.regime?S.regime.sizeMult:1)*memSizeMult())); }
 // مضاعف خطوة الشبكة المستمد من الذاكرة القوية:
 // زوج/اتجاه رابح تاريخيًا → خطوة أضيق (التقاط أكثر) · خاسر → خطوة أوسع (حذر أكبر)
 export function memStepMult(){ const mem=S.memory; if(!mem||!mem.pairs) return 1;
@@ -469,12 +476,76 @@ function noteClose(qty,exit,fee,source,pnl,lotId){ const lotId_=lotId;
   // تعلّم من نتيجة الصفقة — يُخزَّن في الذاكرة القوية التي لا تُمسح مع الدورات
   learnTrade(row?row.side:(S.position?S.position.side:S.config.direction), pnl);
   return pnl; }
+// فترة اليوم (UTC): آسيا 0-8 · أوروبا 8-16 · أمريكا 16-24
+function sessionOf(ts){ const h=new Date(ts).getUTCHours(); return h<8?'آسيا':h<16?'أوروبا':'أمريكا'; }
 function learnTrade(side,pnl){ if(!Number.isFinite(pnl)) return;
   const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
   const k=S.config.symbol+':'+(side||'short');
-  const r=mem.pairs[k]=mem.pairs[k]||{w:0,l:0,n:0,pnl:0};
+  const r=mem.pairs[k]=mem.pairs[k]||{w:0,l:0,n:0,pnl:0,streak:0,maxLoseStreak:0,slip:0,sessions:{},regimes:{}};
   r.n++; r.pnl=Math.round((r.pnl+pnl)*10000)/10000;
-  if(pnl>0) r.w++; else if(pnl<0) r.l++; }
+  if(pnl>0){ r.w++; r.streak=(r.streak>0?r.streak:0)+1; }
+  else if(pnl<0){ r.l++; r.streak=(r.streak<0?r.streak:0)-1;
+    r.maxLoseStreak=Math.max(r.maxLoseStreak||0,-r.streak); }
+  // تعلم حسب توقيت اليوم — أي فترة ينجح فيها هذا الزوج/الاتجاه
+  const ses=sessionOf(Date.now());
+  const so=r.sessions[ses]=r.sessions[ses]||{w:0,l:0,n:0,pnl:0};
+  so.n++; so.pnl=Math.round((so.pnl+pnl)*10000)/10000;
+  if(pnl>0)so.w++; else if(pnl<0)so.l++;
+  // تعلم حسب نوع السوق — أي ظرف يناسب هذا الزوج/الاتجاه
+  const rg=S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي';
+  const ro=r.regimes[rg]=r.regimes[rg]||{w:0,l:0,n:0,pnl:0};
+  ro.n++; ro.pnl=Math.round((ro.pnl+pnl)*10000)/10000;
+  if(pnl>0)ro.w++; else if(pnl<0)ro.l++;
+  // تذكّر نتيجة الفوز لإعادة الدخول الذكية في الموجة المستمرة
+  if(pnl>0) S._lastWinClose={at:Date.now(),side:side||S.config.direction}; }
+// انزلاق التنفيذ — يقاس عند فتح كل مستوى ويُخزن كمتوسط متحرك في الذاكرة
+function learnSlippage(side,slipPct){ if(!Number.isFinite(slipPct)) return;
+  const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
+  const r=mem.pairs[S.config.symbol+':'+side]=mem.pairs[S.config.symbol+':'+side]||{w:0,l:0,n:0,pnl:0,streak:0,slip:0,sessions:{},regimes:{}};
+  r.slip=r.slip?Math.round((r.slip*0.7+slipPct*0.3)*10000)/10000:slipPct; }
+// إحصاءات مجمعة من الذاكرة القوية — للوحة الأداء والتقارير
+export function memStats(){ const mem=S.memory; const o={n:0,w:0,l:0,pnl:0,grossWin:0,grossLoss:0,maxLoseStreak:0,pf:0,winRate:0,avgWin:0,avgLoss:0};
+  if(!mem||!mem.pairs) return o;
+  for(const k of Object.keys(mem.pairs)){ const r=mem.pairs[k];
+    o.n+=r.n||0; o.w+=r.w||0; o.l+=r.l||0; o.pnl+=r.pnl||0;
+    o.maxLoseStreak=Math.max(o.maxLoseStreak,r.maxLoseStreak||0);
+    if(r.w&&r.pnl>0){ /* التقريب على مستوى الزوج */ } }
+  // الإجماليات الدقيقة تحتاج تفصيل كل صفقة — نقدّرها من متوسطات الأزواج
+  o.winRate=o.n?o.w/o.n:0; o.pnl=Math.round(o.pnl*100)/100;
+  let gw=0,gl=0,aw=0,al=0;
+  for(const k of Object.keys(mem.pairs)){ const r=mem.pairs[k];
+    if(r.pnl>0){ gw+=r.pnl; aw+=r.w?r.pnl/r.w:0; } else { gl+=-r.pnl; al+=r.l?-r.pnl/r.l:0; } }
+  o.grossWin=Math.round(gw*100)/100; o.grossLoss=Math.round(gl*100)/100;
+  o.pf=gl>0?Math.round(gw/gl*100)/100:(gw>0?99:0);
+  o.avgWin=Math.round(aw*100)/100; o.avgLoss=Math.round(al*100)/100;
+  return o; }
+// حجم الصفقة التكيفي (Kelly مبسّط) — سلسلة نجاح تكبّر الحجم وسلسلة خسارة تصغّره
+function memSizeMult(){ const mem=S.memory; if(!mem||!mem.pairs) return 1;
+  const r=mem.pairs[S.config.symbol+':'+S.config.direction]; if(!r) return 1;
+  const st=r.streak||0;
+  if(st>=3) return 1.25;
+  if(st<=-3) return 0.5;
+  if(st<=-2) return 0.7;
+  return 1; }
+// انحراف الحيتان: سعر يتحرك عكس تدفق الصفقات الكبيرة = انعكاس محتمل
+// يرجع 1 (انحراف صعودي) / -1 (هبوطي) / 0 (لا انحراف)
+function cvdDivergence(){ const t=S.cvdTrail; if(!t||t.length<15) return 0;
+  let mn=Infinity,mx=-Infinity; for(const p of t){ if(p.cvd<mn)mn=p.cvd; if(p.cvd>mx)mx=p.cvd; }
+  const range=mx-mn; if(!(range>0)) return 0;
+  const a=t[Math.max(0,t.length-25)], b=t[t.length-1];
+  const flow=(b.cvd-a.cvd)/range;
+  const mom=S.confluence?S.confluence.momentum:0;
+  if(mom>0.05&&flow<-0.4) return -1;
+  if(mom<-0.05&&flow>0.4) return 1;
+  return 0; }
+// تقرير أداء دوري بإشعار — كل 6 ساعات أثناء العمل
+function maybeReport(){ const now=Date.now();
+  if(S.status!=='running'&&S.status!=='paused') return;
+  if(S._lastReportAt&&now-S._lastReportAt<6*3600*1000) return;
+  const st=memStats(); if(!st.n) return;
+  S._lastReportAt=now;
+  const msg='صفقات متعلَّمة: '+st.n+' · نجاح '+(st.winRate*100).toFixed(0)+'% · عامل الربح '+st.pf+' · صافي الذاكرة '+fmtUsd(st.pnl);
+  pushLog('info','تقرير دوري — '+msg); nativeNotify('TRQ — تقرير الأداء',msg); }
 function placeTpOpposite(f){ if(S.status!=='running') return;
   const notional=Math.max(1e-9,f.qty*(S.multiplier||1)*f.price);
   const cover=(S.makerFee+S.takerFee+MIN_NET_USD/notional)*100;
@@ -503,7 +574,10 @@ function fillLevel(id,fp,taker){ const l=S.grid.find(g=>g.id===id);
   const fee=feeFor(l.qty*(S.multiplier||1)*fp,taker); S.feesPaid+=fee;
   const d=applyDelta(l.side,l.qty,fp);
   if(d.addedQty>0){ const lotId=noteEntry(d.addedQty,fp,fee,l.origin==='hunt'?'hunt':'grid');
-    l.lotId=l.lotId||lotId; }
+    l.lotId=l.lotId||lotId;
+    // قياس انزلاق التنفيذ: فرق سعر التنفيذ الفعلي عن سعر المستوى المطلوب
+    if(l.price>0) learnSlippage(l.side==='sell'?'short':'long',
+      Math.round(Math.abs(fp-l.price)/l.price*100*10000)/10000); }
   if(d.closedQty>0){ const src=l.origin==='hunt'?'صفقة':'شبكة';
     const row=l.lotId?S.journal.find(j=>j.id===l.lotId):null;
     const net=row?lotNet(row.side,row.entry,fp,row.qty,row.fees+fee)
@@ -516,7 +590,8 @@ function fillLevel(id,fp,taker){ const l=S.grid.find(g=>g.id===id);
     S.huntAnchor=fp; S.lastHuntAt=Date.now()-400; }
   if(S.position&&S.status==='running') syncPositionTp();
   S.lastWorkAt=Date.now();
-  notify((l.side==='sell'?'بيع ':'شراء ')+(l.origin==='hunt'?'صفقة':l.reduceOnly?'جني':'شبكة')+' @ '+fmtPx(fp)); }
+  notify((l.side==='sell'?'بيع ':'شراء ')+(l.origin==='hunt'?'صفقة':l.reduceOnly?'جني':'شبكة')+' @ '+fmtPx(fp),
+    (l.reduceOnly&&d.closedQty>0)?'win':null); }
 function selectDueAdds(due,p){ if(addsBlocked()) return [];
   if(S.position&&!inAddZone(p)) return [];
   const adds=due.filter(l=>!l.reduceOnly&&!coveringLoser(l,p))
@@ -575,6 +650,9 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
       const rg=S.regime||{trend:'range'};
       const aligned=(side==='long'&&rg.trend==='up')||(side==='short'&&rg.trend==='down');
       if(aligned&&rg.shock) dist=Math.min(0.5,dist*1.4);
+      // انحراف حيتان ضد المركز أثناء التتبع = انعكاس وشيك — ضيّق التتبع واقفل الربح بسرعة
+      const dv=cvdDivergence();
+      if((side==='short'&&dv===1)||(side==='long'&&dv===-1)) dist*=0.6;
       if(retrace>=dist||net<=Math.max(0.02,notional*0.0004)) fillLevel(tp.id,p,true);
       continue; }
 
@@ -612,12 +690,27 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
   const f=tapeFlow();
   if(f.whaleVol>0.25){ if(short&&f.whale>0.5) return false; if(!short&&f.whale<-0.5) return false; }
   if(short&&f.bias>0.35) return false; if(!short&&f.bias<-0.35) return false;
+  // فلتر التمويل: تمويل مرتفع ضد اتجاهك يأكل الربح بصمت — لا دخول
+  const fund=S.funding||0;
+  if(!short&&fund>0.0004) return false;   // لونغ يدفع تمويلًا مرتفعًا
+  if(short&&fund<-0.0004) return false;   // شورت يدفع تمويلًا مرتفعًا
+  // انحراف الحيتان: سعر يتحرك عكس تدفقهم = انعكاس وشيك — لا تدخل ضده
+  const dv=cvdDivergence();
+  if(short&&dv===1) return false;   // تدفق شرائي قوي تحت سعر هابط
+  if(!short&&dv===-1) return false; // تدفق بيعي قوي فوق سعر صاعد
   // بوابة الذاكرة القوية: اتجاه خاسر تاريخيًا على هذا الزوج يُحظر حتى تتحسن نتائجه
   const mp=S.memory&&S.memory.pairs&&S.memory.pairs[S.config.symbol+':'+(short?'short':'long')];
   if(mp&&mp.n>=6&&mp.pnl<0&&(mp.w/mp.n)<0.35){
     if(!S._memBlockAt||Date.now()-S._memBlockAt>600000){ S._memBlockAt=Date.now();
       pushLog('info','الذاكرة: اتجاه '+(short?'الشورت':'اللونغ')+' على هذا الزوج خاسر تاريخيًا ('+mp.w+'/'+mp.n+') — ممنوع مؤقتًا'); }
     return false; }
+  // بوابة التوقيت والظرف: فترة اليوم أو نوع السوق خاسر تاريخيًا لهذا الزوج/الاتجاه
+  if(mp){
+    const so=mp.sessions&&mp.sessions[sessionOf(Date.now())];
+    if(so&&so.n>=5&&so.pnl<0&&(so.w/so.n)<0.35) return false;
+    const rg=S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي';
+    const ro=mp.regimes&&mp.regimes[rg];
+    if(ro&&ro.n>=5&&ro.pnl<0&&(ro.w/ro.n)<0.35) return false; }
   return true; }
 function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   const mag=Math.abs(S.biasScore);
@@ -628,6 +721,8 @@ function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   if(rg){ const sh=S.config.direction==='short';
     const aligned=(sh&&rg.trend==='down')||(!sh&&rg.trend==='up');
     if(aligned&&!rg.shock) scaled*=0.8; }
+  // إعادة دخول ذكية: ربح حديث على نفس الاتجاه والموجة مستمرة — اركب الموجة التالية أسرع
+  if(S._lastWinClose&&Date.now()-S._lastWinClose.at<180000&&S._lastWinClose.side===S.config.direction) scaled*=0.7;
   if(S.position&&S.position.side!==S.config.direction) return Math.max(0.08,scaled*0.4);
   if(stalled&&huntAligned()) return Math.max(0.12,scaled*0.55);
   if(mag>=28&&huntAligned()) return Math.max(0.14,scaled*0.75);
@@ -720,8 +815,7 @@ function circuitBreak(p){ if(!p||S.status!=='running') return;
   const limit=Math.max(1.5,(S.config.cycleBalance||0)*0.04);
   const cyc=(S.realizedPnl||0)+(S.position?S.position.unrealized:0)-(S.feesPaid||0);
   if(cyc<=-limit){ flattenAt(p,'كابح الخسارة'); S.status='paused';
-    pushLog('error','كابح الخسارة: تجاوزت الدورة حد الخسارة المسموح — إيقاف مؤقت للحماية');
-    nativeNotify('TRQ ⚠️','كابح الخسارة: أُغلق المركز وأُوقف البوت مؤقتًا لحماية رأس المال'); } }
+    notify('كابح الخسارة: أُغلق المركز وأُوقف البوت مؤقتًا لحماية رأس المال','warn'); } }
 function escapeAdverse(p){ if(S.status!=='running'||!S.position||!p) return;
   const danger=liqDanger(p), flip=reversalAgainst(p);
   if(!danger&&!flip) return;
@@ -837,7 +931,9 @@ function onStreamTick(d){
   if(d.trade&&d.trade.price>0){
     S.lastPrice=d.trade.price; S.lastTickAt=now;
     S.tape=[d.trade,...S.tape].slice(0,32);
-    S.cvd+=d.trade.side==='buy'?d.trade.size:-d.trade.size; }
+    S.cvd+=d.trade.side==='buy'?d.trade.size:-d.trade.size;
+    // مسار CVD — لكشف انحراف الحيتان (السعر عكس التدفق)
+    if(!S._cvdAt||now-S._cvdAt>1500){ S.cvdTrail=[...(S.cvdTrail||[]),{t:now,cvd:S.cvd}].slice(-90); S._cvdAt=now; } }
   S.confluence=readConfluence(); S.regime=readRegime();
   emitThrottled();
 }
@@ -952,6 +1048,7 @@ async function botTick(){
     }
     pruneGhosts(); markUnrealized(price||m.price);
     try{ await liveSync(); }catch(e){}
+    try{ maybeReport(); }catch(e){}
     emit(); saveAll();
   }catch(e){ S.lastTickAt=Date.now();
     if(!/abort|timeout|429|50[0-4]|fetch/i.test(e.message||'')) pushLog('error',e.message||String(e)); }

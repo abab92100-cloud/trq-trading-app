@@ -57,6 +57,8 @@ export default function Chart() {
   }, [S.config.symbol, gran]);
 
   useEffect(() => {
+    // توفير البطارية: لا رسم والشاشة مغلقة — المحرك يعمل بكامل سرعته في الخلفية
+    if (typeof document !== 'undefined' && document.hidden) return;
     const cv = ref.current; if (!cv) return;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const W = cv.clientWidth, H = cv.clientHeight; if (!W) return;
