@@ -145,20 +145,31 @@ function pushJr(row){ S.journal=[row,...S.journal].slice(0,120); }
    ================================================================ */
 const DIRECT_BASE = 'https://api-futures.kucoin.com';
 // داخل تطبيق الجوال (Capacitor) لا يوجد بروكسي إطلاقًا — اتصال مباشر من أول طلب
-let API_BASE = (typeof window !== 'undefined' && (window.Capacitor || location.protocol === 'capacitor:'))
-  ? DIRECT_BASE : '/kucoin';
+const IS_NATIVE = (typeof window !== 'undefined' && (window.Capacitor || location.protocol === 'capacitor:'));
+let API_BASE = IS_NATIVE ? DIRECT_BASE : '/kucoin';
 // AbortSignal.timeout غير مدعوم في WebViews القديمة — بديل متوافق
 function sig(ms){ const c=new AbortController(); setTimeout(()=>c.abort(),ms); return c.signal; }
 async function kcFetch(path,opts){
-  if(API_BASE===DIRECT_BASE) return await fetch(API_BASE+path,opts);
+  if(API_BASE===DIRECT_BASE){
+    if(IS_NATIVE) return await fetch(API_BASE+path,opts);
+    // تحوّل سابق بسبب عثرة بروكسي — إن فشل المباشر أيضًا (CORS) نرجع للبروكسي ولا نقفل عليه
+    try{ return await fetch(API_BASE+path,opts); }
+    catch(e){ if(e&&e.name==='AbortError') throw e;
+      API_BASE='/kucoin'; return await fetch(API_BASE+path,freshOpts(opts)); } }
   let res;
   try{ res=await fetch(API_BASE+path,opts); }
-  catch(e){ API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,opts); }
+  catch(e){
+    // مهلة/إجهاض = مشكلة الطلب نفسه وليست غياب البروكسي — لا تحويل نهائي للمباشر بسببها
+    if(e&&e.name==='AbortError') throw e;
+    API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,freshOpts(opts)); }
   // 404 أو استجابة HTML (خادم الجوال المحلي يرجع index.html برمز 200) = لا بروكسي — تحوّل مباشر نهائي
   if(res.status===404 || !(res.headers.get('content-type')||'').toLowerCase().includes('json')){
-    API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,opts); }
+    API_BASE=DIRECT_BASE; return await fetch(API_BASE+path,freshOpts(opts)); }
   return res;
 }
+// إشارة المهلة الأولى قد تكون استُنفدت — المحاولة البديلة تحتاج إشارة جديدة وإلا فشلت فورًا
+function freshOpts(opts){ if(!opts||!opts.signal) return opts;
+  const o={...opts}; o.signal=sig(8000); return o; }
 function normFee(raw,fb){ const n=Number(raw);
   if(!Number.isFinite(n)||n<=0) return fb;
   return n>=0.05 ? n/100 : n; }
