@@ -102,7 +102,7 @@ function HomeScreen() {
   const d = desk();
   const first = S.priceTrail[0];
   const chg = first > 0 && S.lastPrice ? ((S.lastPrice - first) / first) * 100 : 0;
-  const net = d.winPnl + d.losePnl + (S.position ? S.position.unrealized : 0);
+  const net = S.position ? S.position.unrealized : 0; // صافي الصفقة الحالية فقط — المجني له مربعه الخاص
   const live = S.status === 'running' && S.lastTickAt && Date.now() - S.lastTickAt < 15000;
   const liqDangerNow = S.liqPrice && S.lastPrice &&
     (S.position && S.position.side === 'long' ? S.lastPrice <= S.liqPrice * 1.05 : S.lastPrice >= S.liqPrice * 0.95);
@@ -163,7 +163,8 @@ function HomeScreen() {
       <div className="card" style={{ marginTop: 12 }}>
         <div className="grid3" style={{ textAlign: 'center' }}>
           <div><small className="subtle">حقوق الدورة</small><div className="mono up">{'$' + equity().toFixed(2)}</div></div>
-          <div><small className="subtle">صافي الربح</small><div className={'mono ' + (net > 0 ? 'up' : net < 0 ? 'dn' : '')}>{fmtUsd(net) + ' $'}</div></div>
+          <div><small className="subtle">صافي الصفقة الحالية</small><div className={'mono ' + (net > 0 ? 'up' : net < 0 ? 'dn' : '')}>{fmtUsd(net) + ' $'}</div></div>
+          <div><small className="subtle">الربح المجني</small><div className={'mono ' + ((S.cycleHarvested || 0) > 0 ? 'up' : (S.cycleHarvested || 0) < 0 ? 'dn' : '')}>{fmtUsd(S.cycleHarvested || 0) + ' $'}</div></div>
           <div><small className="subtle">التصفية</small><div className={'mono ' + (liqDangerNow ? 'dn' : '')}>{S.liqPrice ? fmtPx(S.liqPrice) : '—'}</div></div>
         </div>
         <div className="sep"></div>

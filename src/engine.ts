@@ -126,7 +126,7 @@ export const S = {
   multiplier:1, tickSize:0.1, makerFee:0.0002, takerFee:0.0006, funding:0,
   grid:[], position:null, journal:[], logs:[],
   history:[], linkOk:false, exEquity:null,
-  realizedPnl:0, feesPaid:0,
+  realizedPnl:0, feesPaid:0, cycleHarvested:0,
   priceTrail:[], emaFast:null, emaSlow:null, cvd:0, tape:[],
   biasScore:0, biasReasons:[], regime:null, confluence:null,
   huntAnchor:null, gridAnchor:null, lastHuntAt:0, lastAddAt:0, lastWorkAt:0, huntCount:0,
@@ -145,7 +145,7 @@ function saveAll(){ try{
   localStorage.setItem('trq:snd',S.sound?'1':'0');
   localStorage.setItem('trq:tone',S.soundTone||'soft');
   const rt={grid:S.grid,position:S.position,journal:S.journal,realizedPnl:S.realizedPnl,
-    feesPaid:S.feesPaid,priceTrail:S.priceTrail,cvd:S.cvd,huntCount:S.huntCount,
+    feesPaid:S.feesPaid,cycleHarvested:S.cycleHarvested||0,priceTrail:S.priceTrail,cvd:S.cvd,huntCount:S.huntCount,
     lastPrice:S.lastPrice,markPrice:S.markPrice,activeCycle:S.activeCycle,status:S.status,
     history:S.history,logs:S.logs};
   localStorage.setItem('trq:rt',JSON.stringify(rt));
@@ -158,7 +158,7 @@ function loadAll(){ try{
   S.soundTone=localStorage.getItem('trq:tone')||'soft';
   const rt=JSON.parse(localStorage.getItem('trq:rt')||'null');
   if(rt){ Object.assign(S,{grid:rt.grid||[],position:rt.position||null,journal:rt.journal||[],
-    realizedPnl:rt.realizedPnl||0,feesPaid:rt.feesPaid||0,priceTrail:rt.priceTrail||[],
+    realizedPnl:rt.realizedPnl||0,feesPaid:rt.feesPaid||0,cycleHarvested:rt.cycleHarvested||0,priceTrail:rt.priceTrail||[],
     cvd:rt.cvd||0,huntCount:rt.huntCount||0,lastPrice:rt.lastPrice??null,
     markPrice:rt.markPrice??null,activeCycle:rt.activeCycle||null,status:rt.status||'idle',
     history:rt.history||[],logs:rt.logs||[]}); }
@@ -739,6 +739,10 @@ function noteClose(qty,exit,fee,source,pnl,lotId){ const lotId_=lotId;
     mergedOrders:1,status:'closed'});
   if(S.activeCycle){ S.activeCycle.pnl+=pnl;
     if(!S.position){ S.activeCycle=null; } }
+  // الربح المجني يُضاف فورًا لرصيد الدورة — التراكم يكبّر أحجام الصفقات التالية تلقائيًا
+  if(Number.isFinite(pnl)&&pnl!==0){
+    S.cycleHarvested=Math.round(((S.cycleHarvested||0)+pnl)*10000)/10000;
+    S.config.cycleBalance=Math.max(1,Math.round((S.config.cycleBalance+pnl)*100)/100); }
   // تعلّم من نتيجة الصفقة — يُخزَّن في الذاكرة القوية التي لا تُمسح مع الدورات
   learnTrade(row?row.side:(S.position?S.position.side:S.config.direction), pnl);
   return pnl; }
@@ -896,6 +900,9 @@ function inAddZone(p){ if(S.status!=='running'||!p) return false;
   if(pos.side==='long'&&(f.whale<-0.6||f.bias<-0.45)) return false;
   return true; }
 function harvestRipe(p){ if(!p||S.status==='idle') return;
+  // نبض السوق اللحظي — يقود قرار الجني الاستباقي (يُحسب مرة واحدة لكل نبضة)
+  const mom=S.confluence?S.confluence.momentum:0;
+  const fl=tapeFlow(); const dv=cvdDivergence();
   for(const tp of S.grid.filter(g=>g.reduceOnly&&(g.status==='open'||g.status==='armed'))){
     const lot=tp.lotId?S.journal.find(j=>j.id===tp.lotId):null;
     const entry=lot?lot.entry:(S.position?S.position.entry:tp.price);
@@ -909,39 +916,68 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     // حد الجني بطلب المالك: $0.15 صافيًا بعد الرسوم لكل صفقة — لا جني تافهًا ولا احتفاظ حتى الخسارة
     const minNet=0.15;
 
-    // ——— تتبع الربح بالدولار (وليس بالسعر) ———
-    // يتفعّل التتبع فور بلوغ الصافي $0.20، ويتبع القمة بفجوة $0.05:
-    // أي تراجع يعيد الصافي إلى (القمة − $0.05) — وبحد أدنى $0.15 — يُجنى الربح فورًا.
+    // قراءة اتجاه الرياح لصالح/ضد هذا المستوى:
+    // مدعوم = تدفق+زخم مع ربحنا → وسّع الفجوة لالتقاط موجة أكبر
+    // منعكس = تدفق حيتان/زخم/انحراف ضدنا → الفجوة ملاصقة وجني استباقي
+    const support=(side==='short'?(mom<-0.04&&fl.bias<-0.15):(mom>0.04&&fl.bias>0.15));
+    const reversal=(side==='short'?(fl.whale>0.5||dv===1||mom>0.10):(fl.whale<-0.5||dv===-1||mom<-0.10));
+
+    // ——— التتبع الذكي الاستباقي بالدولار ———
     if(tp.peakNet!=null){
       if(net>tp.peakNet) tp.peakNet=net;
-      const stop=Math.max(0.15,tp.peakNet-0.05);
+      // قفل متدرج بلا رجعة: كل قمة ترفع أرضية الربح المقفل
+      const lock=tp.peakNet>=0.50?0.42:tp.peakNet>=0.30?0.25:0.15;
+      // فجوة متكيفة: مدعومة 0.10 (دعها تركض) · عادية 0.05 · منعكسة 0.02 (ملاصقة)
+      const gap=reversal?0.02:support?0.10:0.05;
+      const stop=Math.max(lock,tp.peakNet-gap);
+      // جني استباقي: انعكاس مؤكد ونحن فوق الأرضية — أغلق فورًا ولا تنتظر ملامسة الحد
+      const preempt=reversal&&net>=lock&&net<tp.peakNet;
       // هروب طارئ فقط: مركز عالق عكسيًا عميقًا يُقبل فيه خروج أصغر بدل كارثة
       const escape=stuck&&net>=0.10;
-      if(net<=stop||escape) fillLevel(tp.id,p,true);
+      if(net<=stop||preempt||escape) fillLevel(tp.id,p,true);
       continue; }
 
     if(net<minNet) continue;
+    // مصد الجزئي الفوري: ربح هش (0.15–0.20) + زخم منعكس = أغلق فورًا قبل أن يتبخر
+    if(net<0.20&&reversal){ fillLevel(tp.id,p,true); continue; }
     // تسامح بمقدار نصف تكة — «السعر عند المستوى» يُفعّل التتبع فورًا
     const tol=Math.min(S.tickSize>0?S.tickSize*0.5:1e-12, Math.abs(tp.price)*0.0005);
     const crossed=tp.side==='sell'?p>=tp.price-tol:p<=tp.price+tol;
     // يتفعّل التتبع ببلوغ $0.20 صافيًا، أو ببلوغ مستوى الجني مع صافٍ مجدٍ
     if(net>=0.20||crossed) tp.peakNet=net; }
 
-  // ——— حارس صافي المركز كاملًا ———
+  // ——— حارس صافي المركز كاملًا + صائد الفتيلات ———
   // فتيلة دقيقة واحدة قد ترفع صافي المركز فوق دولار بينما كل مستوى منفردًا تحت $0.20
   // فلا يتسلح أحدها — هنا يُراقب المجموع: تسليح عند $0.30 وجني الكل عند تراجع $0.08 من القمة
   if(S.position){ const pos=S.position, qty=pos.size||0;
     if(qty>0){ const sgn=pos.side==='short'?1:-1;
       const netAll=sgn*(pos.entry-p)*(S.multiplier||1)*qty
         -qty*(S.multiplier||1)*(pos.entry*S.makerFee+p*S.takerFee);
-      if(S._posPeakNet==null){ if(netAll>=0.30){ S._posPeakNet=netAll;
+      // صائد الفتيلات: قفزة صافي ≥ $0.30 خلال 6 ثوانٍ — جني نصف المركز فورًا وتتبع الباقي
+      const pn=S._posNetPrev;
+      if(pn&&netAll-pn.jump>=0.30&&Date.now()-pn.at<=6000&&qty>=2&&!S._spikeDone){
+        S._spikeDone=true; const half=Math.floor(qty/2);
+        const halfNet=sgn*(pos.entry-p)*(S.multiplier||1)*half-feeFor(half*(S.multiplier||1)*p,true);
+        pushLog('server','⚡ فتيلة +$'+(netAll-pn.jump).toFixed(2)+' خلال ثوانٍ — جني نصف المركز فورًا وتتبع الباقي');
+        if(S.config.mode==='live'&&S.keys) exCloseQty(S.config.symbol,pos.side,half)
+          .catch(e=>pushLog('error','جني الفتيلة الحقيقي فشل: '+(e.message||e)));
+        applyDelta(pos.side==='short'?'buy':'sell',half,p);
+        noteClose(half,p,feeFor(half*(S.multiplier||1)*p,true),'فتيلة',halfNet,null);
+        if(!S.position){ S._posPeakNet=null; S._spikeDone=false; }
+        else { S._posPeakNet=Math.max(S._posPeakNet||0,netAll); }
+        emit(); saveAll(); }
+      else { S._posNetPrev={jump:netAll,at:Date.now()}; }
+      if(!S.position){ S._posPeakNet=null; S._spikeDone=false; }
+      else if(S._posPeakNet==null){ if(netAll>=0.30){ S._posPeakNet=netAll;
           pushLog('server','⚡ صافي المركز $'+netAll.toFixed(2)+' — تتبع الانزلاق مُسلّح'); } }
       else{ if(netAll>S._posPeakNet) S._posPeakNet=netAll;
-        const stopAll=Math.max(0.15,S._posPeakNet-0.08);
-        if(netAll<=stopAll){ S._posPeakNet=null;
+        // قفل متدرج للمركز كله أيضًا: القمة الكبيرة ترفع الأرضية
+        const lockAll=S._posPeakNet>=0.50?0.42:S._posPeakNet>=0.30?0.25:0.15;
+        const stopAll=Math.max(lockAll,S._posPeakNet-0.08);
+        if(netAll<=stopAll){ S._posPeakNet=null; S._spikeDone=false;
           pushLog('server','⚡ صيد انزلاق ✓ — تراجع الصافي من القمة، جني المركز كاملًا');
           flattenAt(p,'صيد انزلاق'); return; } } } }
-  else S._posPeakNet=null;
+  else { S._posPeakNet=null; S._spikeDone=false; S._posNetPrev=null; }
 
   // ——— درع الانزلاق العكسي ———
   // حركة حادة ضد المركز خلال ثوانٍ: ألغِ تسليح المستويات فورًا — إضافة في شلال = متوسط كارثي
@@ -1620,8 +1656,8 @@ export async function stopBot(){ if(S.status==='idle') return;
   clearNativeOngoing();
   pushLog('info','إيقاف — أُغلقت كل الصفقات عند السعر الحالي');
   toast('تم إيقاف البوت'); emit(); saveAll(); }
-export function newCycle(){ const rolled=Math.max(0.01,
-    Math.round((S.config.cycleBalance+S.realizedPnl-S.feesPaid)*100)/100);
+export function newCycle(){ // الرصيد يحمل الأرباح المجناة أصلًا (تُضاف لحظة الجني) — لا جمع مزدوج
+  const rolled=Math.max(0.01,Math.round(S.config.cycleBalance*100)/100);
   const keep=S.status==='running'||S.status==='paused';
   if(S.config.mode==='live'&&S.keys){ exCancelAll(S.config.symbol).catch(()=>{});
     exCancelStops(S.config.symbol).catch(()=>{}); S._guardId=null;
@@ -1637,7 +1673,8 @@ export function newCycle(){ const rolled=Math.max(0.01,
   Object.assign(S,{grid:[],position:null,journal:[],history:[],logs:[],realizedPnl:0,feesPaid:0,
     activeCycle:null,huntCount:0,huntOpen:0,priceTrail:[],emaFast:null,emaSlow:null,
     cvd:0,tape:[],orderBook:{bids:[],asks:[]},status:'idle',startedAt:null,
-    huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null,_memBlockAt:0});
+    huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null,_memBlockAt:0,
+    cycleHarvested:0,_posPeakNet:null,_spikeDone:false,_posNetPrev:null});
   S.config=cfg; S.keys=keys; S.sound=snd; S.soundTone=tone;
   pushLog('info','دورة جديدة برصيد $'+rolled.toFixed(2)+' — مُسحت السجلات وبدأت صفحة نظيفة');
   toast('دورة جديدة برصيد $'+rolled.toFixed(2));
@@ -1712,8 +1749,9 @@ export function saveCfg(v){
 }
 
 /* ---------- مساعدات العرض ---------- */
-export function equity(){ return S.config.cycleBalance+S.realizedPnl+
-  (S.position?S.position.unrealized:0)-S.feesPaid; }
+// الربح المجني يُضاف لحظيًا لرصيد الدورة — الحقوق = الرصيد الحالي + غير المحقق فقط (لا ازدواج)
+export function equity(){ return S.config.cycleBalance+
+  (S.position?S.position.unrealized:0); }
 export function desk(){ const j=S.journal;
   const closed=j.filter(r=>r.status!=='open'), open=j.filter(r=>r.status==='open');
   return {win:closed.filter(r=>r.pnl>0), lose:closed.filter(r=>r.pnl<0),
