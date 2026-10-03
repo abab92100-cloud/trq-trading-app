@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   S, subscribe, initEngine, startBot, pauseBot, stopBot, newCycle,
   saveKeys, clearKeys, saveCfg, equity, desk, pulseAge, fmtPx, fmtUsd, fmtTime,
-  listContracts, memStepMult, memStats, effLevels, scanRadar,
+  listContracts, effLevels, scanRadar,
 } from './engine';
 import { streamState } from './ws';
 import Chart from './Chart';
@@ -306,44 +306,8 @@ function exportCsv() {
 
 function JournalScreen() {
   const rows = [...S.journal, ...(S.history || [])];
-  const mem = S.memory || { pairs: {}, cycles: 0, totalPnl: 0 };
-  const memRows = Object.entries(mem.pairs || {});
-  const st = memStats();
-  const Stat = ({ label, val, col }) => (
-    <div style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 8, padding: '5px 8px', fontSize: 10 }}>
-      <div style={{ color: 'var(--muted)' }}>{label}</div>
-      <b className="mono" style={{ color: col || '#e6edf3', fontSize: 11.5 }}>{val}</b>
-    </div>
-  );
   return (
     <section>
-      <div className="card">
-        <h3>لوحة الأداء — من الذاكرة القوية</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 5 }}>
-          <Stat label="صفقة متعلَّمة" val={st.n} />
-          <Stat label="نسبة النجاح" val={(st.winRate * 100).toFixed(0) + '%'} col={st.winRate >= 0.5 ? '#22c55e' : '#f43f5e'} />
-          <Stat label="عامل الربح" val={st.pf} col={st.pf >= 1 ? '#22c55e' : '#f43f5e'} />
-          <Stat label="متوسط الربح" val={fmtUsd(st.avgWin)} col="#22c55e" />
-          <Stat label="متوسط الخسارة" val={fmtUsd(st.avgLoss)} col="#f43f5e" />
-          <Stat label="أطول سلسلة خسارة" val={st.maxLoseStreak} />
-        </div>
-      </div>
-      <div className="card">
-        <h3>الذاكرة القوية — ما تعلّمه البوت (لا يُمسح أبدًا)</h3>
-        <div className="subtle" style={{ fontSize: 10, marginBottom: 6 }}>
-          {mem.cycles ? ('دورات مكتملة: ' + mem.cycles + ' · صافي متراكم: ' + fmtUsd(mem.totalPnl)) : 'ستتراكم هنا خبرة البوت من كل صفقة'}
-          {' · ضبط الخطوة الآن: ×' + memStepMult().toFixed(1)}
-        </div>
-        {memRows.map(([k, r]) => (
-          <div className="log" key={k}>
-            <span className={(r.pnl > 0 ? 'up' : r.pnl < 0 ? 'dn' : 'muted') + ' mono'}>{fmtUsd(r.pnl)}</span>
-            <span>{k.replace('USDTM:', '/').replace(':short', ' شورت').replace(':long', ' لونغ')}
-              <span className="subtle"> · نجاح {r.w}/{r.n}
-                {r.slip ? ' · انزلاق ' + r.slip.toFixed(3) + '%' : ''}
-                {(r.streak || 0) >= 3 ? ' · 🔥×' + r.streak : (r.streak || 0) <= -3 ? ' · سلسلة خسارة ' + (-r.streak) : ''}</span></span>
-          </div>
-        ))}
-      </div>
       <div className="card">
         <h3>سجل الصفقات
           <button onClick={exportCsv}

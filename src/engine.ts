@@ -167,14 +167,9 @@ function loadAll(){ try{
   // لكن لا صفقة جديدة ولا صيد حتى يقرر المالك
   if(S.status==='running'){ S.status='paused';
     pushLog('info','استُعيدت الجلسة متوقفة مؤقتًا — اضغط «تشغيل» للبدء'); }
+  // بصمات العملات (دراسة 60 ثانية) تُحفظ — أما سجل التعلم فأُلغي نهائيًا بطلب المالك
   const mem=JSON.parse(localStorage.getItem('trq:mem')||'null');
-  if(mem&&mem.pairs) S.memory=mem;
-  // إصدار الذاكرة: كل ترقية استراتيجية تسقط قيود الماضي المخزنة — التعلم يبدأ بقواعد اليوم
-  const MEM_V=3;
-  if(!S.memory||S.memory.v!==MEM_V){ const had=!!(S.memory&&S.memory.pairs&&Object.keys(S.memory.pairs).length);
-    const prof=S.memory&&S.memory.profiles;
-    S.memory={v:MEM_V,pairs:{},cycles:0,totalPnl:0,profiles:prof||{}};
-    if(had) pushLog('server','ذاكرة تعلم جديدة — أُسقطت قيود النسخ السابقة المخزنة وبدأ التعلم من صفحة نظيفة'); }
+  S.memory={v:3,pairs:{},cycles:0,totalPnl:0,profiles:(mem&&mem.profiles)||{}};
 }catch(e){} }
 
 /* ---------- السجل ---------- */
@@ -333,9 +328,11 @@ export async function scanRadar(){
     const list=det.filter(d=>d.price>0).map(d=>{ const s=radarScore(d);
       return {symbol:d.symbol,disp:d.symbol.replace(/USDTM$/i,'').replace(/^XBT/i,'BTC'),
         price:d.price,score:s.score,why:s.why,state:d.state||'—',
-        vol:+d.vol.toFixed(2),chg:Math.round(d.chg*10)/10,
+        vol:+d.vol.toFixed(2),chg:Math.round(d.chg*10)/10,turnover:d.turnover,
         grade:s.score>=65?'🟢':s.score>=45?'🟡':'🔴'}; })
-      .sort((a,b)=>b.score-a.score);
+      // الأفضل أولًا بلا تعادل مربك: الدرجة، ثم العرضي المتذبذب يتقدم، ثم الأعلى سيولة
+      .sort((a,b)=>b.score-a.score||
+        (b.state==='عرضي متذبذب')-(a.state==='عرضي متذبذب')||b.turnover-a.turnover);
     S.radar={at:Date.now(),list};
     // توصية التبديل: عملتي الحالية ضعيفة وأخرى أقوى منها بفارق واضح
     const cur=list.find(l=>l.symbol===S.config.symbol);
@@ -733,48 +730,10 @@ function noteClose(qty,exit,fee,source,pnl,lotId){ const lotId_=lotId;
   return pnl; }
 // فترة اليوم (UTC): آسيا 0-8 · أوروبا 8-16 · أمريكا 16-24
 function sessionOf(ts){ const h=new Date(ts).getUTCHours(); return h<8?'آسيا':h<16?'أوروبا':'أمريكا'; }
-function learnTrade(side,pnl){ if(!Number.isFinite(pnl)) return;
-  const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
-  const k=S.config.symbol+':'+(side||'short');
-  const r=mem.pairs[k]=mem.pairs[k]||{w:0,l:0,n:0,pnl:0,streak:0,maxLoseStreak:0,slip:0,sessions:{},regimes:{}};
-  r.n++; r.pnl=Math.round((r.pnl+pnl)*10000)/10000; r.at=Date.now(); // at: مرجع النسيان التدريجي
-  if(pnl>0){ r.w++; r.streak=(r.streak>0?r.streak:0)+1;
-    // ربح يكسر سلسلة خسائر الاتجاه — تُرفع الهدنة فورًا
-    if(S._lossStreak&&S._lossStreak.side===(side||S.config.direction)) S._lossStreak={side:null,n:0,at:0}; }
-  else if(pnl<0){ r.l++; r.streak=(r.streak<0?r.streak:0)-1;
-    r.maxLoseStreak=Math.max(r.maxLoseStreak||0,-r.streak);
-    // هدنة مُحكمة: خسارتان متتاليتان بنفس الاتجاه فقط توقفان الدخول دقيقتين
-    const ls=S._lossStreak=S._lossStreak||{side:null,n:0,at:0};
-    if(ls.side===(side||S.config.direction)) ls.n++; else { ls.side=side||S.config.direction; ls.n=1; }
-    ls.at=Date.now(); }
-  // لقطة ظروف الدخول — الذاكرة تتعلم «في أي ظرف أنجح» لا «أي زوج» فقط
-  const cx=S._entryCtx||{};
-  const ck=(cx.rg||'؟')+'|'+(cx.origin||'؟');
-  const cb=r.ctx=r.ctx||{}; const co=cb[ck]=cb[ck]||{w:0,l:0,n:0,pnl:0};
-  co.n++; co.pnl=Math.round((co.pnl+pnl)*10000)/10000;
-  if(pnl>0)co.w++; else if(pnl<0)co.l++;
-  // انحرافات الصفقة: أقصى ضرر (MAE) وأقصى ربح (MFE) بلغاه المركز — مادة الضبط الذاتي
-  if(S._exc&&(S._exc.mae>0||S._exc.mfe>0)){ r.maeN=(r.maeN||0)+1;
-    r.maeSum=Math.round(((r.maeSum||0)+S._exc.mae)*10000)/10000;
-    r.mfeSum=Math.round(((r.mfeSum||0)+S._exc.mfe)*10000)/10000;
-    S._exc={mae:0,mfe:0}; }
-  // تعلم حسب توقيت اليوم — أي فترة ينجح فيها هذا الزوج/الاتجاه
-  const ses=sessionOf(Date.now());
-  const so=r.sessions[ses]=r.sessions[ses]||{w:0,l:0,n:0,pnl:0};
-  so.n++; so.pnl=Math.round((so.pnl+pnl)*10000)/10000;
-  if(pnl>0)so.w++; else if(pnl<0)so.l++;
-  // تعلم حسب نوع السوق — أي ظرف يناسب هذا الزوج/الاتجاه
-  const rg=S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي';
-  const ro=r.regimes[rg]=r.regimes[rg]||{w:0,l:0,n:0,pnl:0};
-  ro.n++; ro.pnl=Math.round((ro.pnl+pnl)*10000)/10000;
-  if(pnl>0)ro.w++; else if(pnl<0)ro.l++;
-  // تذكّر نتيجة الفوز لإعادة الدخول الذكية في الموجة المستمرة
-  if(pnl>0) S._lastWinClose={at:Date.now(),side:side||S.config.direction}; }
-// انزلاق التنفيذ — يقاس عند فتح كل مستوى ويُخزن كمتوسط متحرك في الذاكرة
-function learnSlippage(side,slipPct){ if(!Number.isFinite(slipPct)) return;
-  const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
-  const r=mem.pairs[S.config.symbol+':'+side]=mem.pairs[S.config.symbol+':'+side]||{w:0,l:0,n:0,pnl:0,streak:0,slip:0,sessions:{},regimes:{}};
-  r.slip=r.slip?Math.round((r.slip*0.7+slipPct*0.3)*10000)/10000:slipPct; }
+// التعلّم من نتائج الصفقات معطّل نهائيًا بطلب المالك — لا كتابة ولا قيود
+function learnTrade(side,pnl){ return; }
+// قياس الانزلاق معطّل مع التعلم — لا كتابة في الذاكرة
+function learnSlippage(side,slipPct){ return; }
 // إحصاءات مجمعة من الذاكرة القوية — للوحة الأداء والتقارير
 export function memStats(){ const mem=S.memory; const o={n:0,w:0,l:0,pnl:0,grossWin:0,grossLoss:0,maxLoseStreak:0,pf:0,winRate:0,avgWin:0,avgLoss:0};
   if(!mem||!mem.pairs) return o;
@@ -1642,9 +1601,7 @@ export function newCycle(){ const rolled=Math.max(0.01,
       .catch(e=>pushLog('error','إغلاق مركز الدورة السابقة فشل: '+(e.message||e))); }
   // نافذة تجاهل 12 ثانية: لا تستعد المركز المغلق للتو كـ«شبح» قبل أن تسوّيه المنصة
   S.ignoreExchangeUntil=Date.now()+12000;
-  // قبل المسح: الذاكرة القوية تتعلم حصيلة الدورة — وهي الوحيدة التي تبقى
-  const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
-  mem.cycles++; mem.totalPnl=Math.round((mem.totalPnl+S.realizedPnl-S.feesPaid)*100)/100;
+  // قبل المسح: تُحسب حصيلة الدورة الجديدة
   const cfg={...S.config,cycleBalance:rolled};
   const keys=S.keys, snd=S.sound, tone=S.soundTone;
   // مسح كامل: سجل الصفقات + الأرشيف + سجل السيرفر — بداية نظيفة كل دورة
@@ -1652,8 +1609,8 @@ export function newCycle(){ const rolled=Math.max(0.01,
     activeCycle:null,huntCount:0,huntOpen:0,priceTrail:[],emaFast:null,emaSlow:null,
     cvd:0,tape:[],orderBook:{bids:[],asks:[]},status:'idle',startedAt:null,
     huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null,_memBlockAt:0});
-  S.config=cfg; S.keys=keys; S.sound=snd; S.soundTone=tone; S.memory=mem;
-  pushLog('info','دورة جديدة برصيد $'+rolled.toFixed(2)+' — مُسحت السجلات وبقيت ذاكرة التعلم ('+mem.cycles+' دورة متعلَّمة)');
+  S.config=cfg; S.keys=keys; S.sound=snd; S.soundTone=tone;
+  pushLog('info','دورة جديدة برصيد $'+rolled.toFixed(2)+' — مُسحت السجلات وبدأت صفحة نظيفة');
   toast('دورة جديدة برصيد $'+rolled.toFixed(2));
   emit(); saveAll(); if(keep) startBot(); }
 
