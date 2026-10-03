@@ -167,6 +167,12 @@ function loadAll(){ try{
   if(S.status==='running'){ S.startedAt=Date.now(); startStudy(true); }
   const mem=JSON.parse(localStorage.getItem('trq:mem')||'null');
   if(mem&&mem.pairs) S.memory=mem;
+  // إصدار الذاكرة: كل ترقية استراتيجية تسقط قيود الماضي المخزنة — التعلم يبدأ بقواعد اليوم
+  const MEM_V=3;
+  if(!S.memory||S.memory.v!==MEM_V){ const had=!!(S.memory&&S.memory.pairs&&Object.keys(S.memory.pairs).length);
+    const prof=S.memory&&S.memory.profiles;
+    S.memory={v:MEM_V,pairs:{},cycles:0,totalPnl:0,profiles:prof||{}};
+    if(had) pushLog('server','ذاكرة تعلم جديدة — أُسقطت قيود النسخ السابقة المخزنة وبدأ التعلم من صفحة نظيفة'); }
 }catch(e){} }
 
 /* ---------- السجل ---------- */
@@ -637,11 +643,15 @@ function learnTrade(side,pnl){ if(!Number.isFinite(pnl)) return;
   const k=S.config.symbol+':'+(side||'short');
   const r=mem.pairs[k]=mem.pairs[k]||{w:0,l:0,n:0,pnl:0,streak:0,maxLoseStreak:0,slip:0,sessions:{},regimes:{}};
   r.n++; r.pnl=Math.round((r.pnl+pnl)*10000)/10000; r.at=Date.now(); // at: مرجع النسيان التدريجي
-  if(pnl>0){ r.w++; r.streak=(r.streak>0?r.streak:0)+1; }
+  if(pnl>0){ r.w++; r.streak=(r.streak>0?r.streak:0)+1;
+    // ربح يكسر سلسلة خسائر الاتجاه — تُرفع الهدنة فورًا
+    if(S._lossStreak&&S._lossStreak.side===(side||S.config.direction)) S._lossStreak={side:null,n:0,at:0}; }
   else if(pnl<0){ r.l++; r.streak=(r.streak<0?r.streak:0)-1;
     r.maxLoseStreak=Math.max(r.maxLoseStreak||0,-r.streak);
-    // تهدئة ما بعد الخسارة: حظر دخول جديد بنفس الاتجاه خمس دقائق — لا مطاردة انفعالية
-    S._lossAt={at:Date.now(),side:side||S.config.direction}; }
+    // هدنة مُحكمة: خسارتان متتاليتان بنفس الاتجاه فقط توقفان الدخول دقيقتين
+    const ls=S._lossStreak=S._lossStreak||{side:null,n:0,at:0};
+    if(ls.side===(side||S.config.direction)) ls.n++; else { ls.side=side||S.config.direction; ls.n=1; }
+    ls.at=Date.now(); }
   // لقطة ظروف الدخول — الذاكرة تتعلم «في أي ظرف أنجح» لا «أي زوج» فقط
   const cx=S._entryCtx||{};
   const ck=(cx.rg||'؟')+'|'+(cx.origin||'؟');
@@ -924,11 +934,67 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
   if(S._btcImp!=null&&Math.abs(S._btcImp)>=0.10){
     if(short&&S._btcImp>0) return false; if(!short&&S._btcImp<0) return false; }
   return true; }
+/* ================================================================
+   فلسفة الصيد الجديدة: الإشارات أبواب مستقلة — أي باب يفتح = صفقة.
+   لا «لابد أن تنطبق جميعها». المنع فقط بفيتو خطر قوي مثبت.
+   ================================================================ */
+// فيتو الخطر: أسباب قوية وحدها تمنع فتح صفقة — ما دونها لا يوقف الصيد
+function dangerVeto(p){ const short=S.config.direction==='short';
+  if(!bookQuality()) return 'دفتر أو سبريد رديء';
+  if(toxicBlocked(S.config.direction)) return 'اتجاه سام في الذاكرة (يُعاد اختباره كل ساعة)';
+  const r=S.regime||{trend:'range',shock:false}, conf=S.confluence||{momentum:0};
+  // صدمة سعرية تقود عكس اتجاه الصيد بقوة
+  if(r.shock){ if(short&&conf.momentum>0.3) return 'صدمة صاعدة عنيفة ضد الشورت';
+    if(!short&&conf.momentum<-0.3) return 'صدمة هابطة عنيفة ضد اللونغ'; }
+  // جدار لاصق مباشرة (<0.10%) بحجم 6 أضعاف الوسيط — مصيدة محققة لا مجرد مقاومة
+  const ob=S.orderBook, lp=S.lastPrice||0;
+  if(ob&&ob.bids.length&&ob.asks.length&&lp>0){ const medL=medLevelSz(ob);
+    if(medL>0){ if(!short){ for(const a of ob.asks.slice(0,5)){ if(a.price>lp&&(a.price-lp)/lp*100<0.10&&a.size>medL*6) return 'جدار بيع لاصق فوق السعر'; } }
+      else { for(const b of ob.bids.slice(0,5)){ if(b.price<lp&&(lp-b.price)/lp*100<0.10&&b.size>medL*6) return 'جدار شراء لاصق تحت السعر'; } } } }
+  // سيل حيتان هائل عكس الاتجاه (تدفق مهيمن + حجم استثنائي)
+  const f=tapeFlow();
+  if(f.whaleVol>0.4){ if(short&&f.whale>0.7) return 'سيل شراء حيتان مهيمن'; if(!short&&f.whale<-0.7) return 'سيل بيع حيتان مهيمن'; }
+  // تمويل متطرف يأكل الصفقة
+  const fund=S.funding||0;
+  if(!short&&fund>0.001) return 'تمويل مرتفع جدًا ضد اللونغ';
+  if(short&&fund<-0.001) return 'تمويل مرتفع جدًا ضد الشورت';
+  return null; }
+// كاشف الإشارات: الحيتان/الفجوات/الارتداد/الزخم/الضغط — أي واحدة تكفي لفتح صفقة
+function huntSignals(p){ const short=S.config.direction==='short'; const sig=[];
+  const conf=S.confluence||{momentum:0,score:0}, r=S.regime||{trend:'range'};
+  // 1) المرساة الكلاسيكية: تحرك ≥ عتبة الصيد من القمة/القاع
+  if(S.huntAnchor){ const pct=(p-S.huntAnchor)/S.huntAnchor*100, need=effectiveHuntPct();
+    if(short?pct<=-need:pct>=need) sig.push('مرساة '+Math.abs(pct).toFixed(2)+'%'); }
+  // 2) فجوة السعر عن المارك — صيد ارتداد
+  const mk=S.markPrice||0;
+  if(mk>0){ const dev=(p-mk)/mk;
+    if(Math.abs(dev)>=0.0015&&((dev>0&&short)||(dev<0&&!short))) sig.push('فجوة مارك'); }
+  // 3) فخ الاختراق (صيد السلاحف)
+  if(S._brk&&Date.now()-S._brk.at<10000){
+    if((S._brk.side==='up'&&p<S._brk.level&&short)||(S._brk.side==='down'&&p>S._brk.level&&!short)){
+      sig.push('فخ اختراق'); S._brk=null; } }
+  // 4) زخم أو اتجاه مساند
+  if(short?(conf.momentum<=-0.06):(conf.momentum>=0.06)) sig.push('زخم');
+  if((short&&r.trend==='down')||(!short&&r.trend==='up')) sig.push('اتجاه');
+  // 5) حيتان مع الاتجاه
+  const f=tapeFlow();
+  if(f.whaleVol>0.2&&((short&&f.whale<-0.3)||(!short&&f.whale>0.3))) sig.push('حيتان');
+  // 6) انحراف سيولة لصالحنا
+  const dv=cvdDivergence();
+  if((short&&dv===-1)||(!short&&dv===1)) sig.push('انحراف سيولة');
+  // 7) ضغط أوامر حدّية (OFI) لصالحنا
+  const ob=S.orderBook; if(ob&&ob.bids.length){ const medL=medLevelSz(ob)||1, n=(S._ofi||0)/(medL*20);
+    if((short&&n<-0.4)||(!short&&n>0.4)) sig.push('ضغط أوامر'); }
+  // 8) قائد BTC يساند الاتجاه
+  if(S._btcImp!=null&&Math.abs(S._btcImp)>=0.10&&((short&&S._btcImp<0)||(!short&&S._btcImp>0))) sig.push('قائد BTC');
+  return sig; }
 function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct,
     (profOf()&&profOf().spread?profOf().spread*2.5:0)); // أرضية سبريد: لا صيد بعائد يأكله الفرق السعري
   const mag=Math.abs(S.biasScore);
   const stalled=S.lastWorkAt&&Date.now()-S.lastWorkAt>90000;
-  let scaled=base*(S.regime?S.regime.huntMult:1)*memHuntMult()*profStepMult();
+  // سقف 1.8 لحاصل المضاعفات — لا تراكب صدمة×ذاكرة×تقلب يرفع العتبة فوق المتناول
+  const mult=Math.min(1.8,(S.regime?S.regime.huntMult:1)*memHuntMult()*profStepMult());
+  let scaled=base*mult;
   // اتجاه قوي نظيف متوافق مع اتجاه البوت — سهّل الاقتناص لاستغلال الموجة بدل تفويتها
   const rg=S.regime;
   if(rg){ const sh=S.config.direction==='short';
@@ -978,9 +1044,9 @@ function toxicDir(dir){ return sanctionLevel(dir)>=2; }
 function toxicBlocked(dir){ const lv=sanctionLevel(dir);
   S._probation=false;
   if(lv<3) return false;
-  // إعادة تأهيل: كل 3 ساعات صفقة استكشافية بنصف حجم — الحظر بلا إعادة اختبار عمى دائم
+  // إعادة تأهيل: كل ساعة صفقة استكشافية بنصف حجم — الحظر بلا إعادة اختبار عمى دائم
   const r=S.memory.pairs[S.config.symbol+':'+dir];
-  if(!r.probAt||Date.now()-r.probAt>3*3600*1000){ r.probAt=Date.now(); S._probation=true;
+  if(!r.probAt||Date.now()-r.probAt>3600*1000){ r.probAt=Date.now(); S._probation=true;
     pushLog('server','إعادة تأهيل — صفقة استكشافية بنصف حجم تختبر '+(dir==='short'?'الشورت':'اللونغ')+' المحظور');
     saveAll(); return false; }
   if(!S._toxicLogAt||Date.now()-S._toxicLogAt>300000){ S._toxicLogAt=Date.now();
@@ -1021,18 +1087,19 @@ function profStepMult(){ const p=profOf(); if(!p||!p.vol) return 1;
   return clamp(p.vol/0.05,0.7,2.2); }
 // التعلم يحسّن الدخول ولا يقيّده فقط: اتجاه ناجح لهذه العملة = اقتناص أسهل · خاسر = تشدد
 function memHuntMult(){ const lv=sanctionLevel(S.config.direction);
-  if(lv>=2) return 1.4;
+  if(lv>=2) return 1.15; // تشديد طفيف لا خنق — العقوبة القصوى (المنع) للسام مستوى 3 فقط
   const r=memRec(S.config.direction); if(!r||r.n<6) return 1;
   const wr=smWR(r);
   if(wr>=0.6&&r.pnl>0) return 0.85;
-  if(lv===1) return 1.25;
+  if(lv===1) return 1.1;
   return 1; }
 function packHunt(p){ return {side:S.config.direction==='short'?'sell':'buy',qty:contractsForLevel(p)}; }
 function huntTrigger(p){ if(S.status!=='running'||!p) return null;
   if(!warmedUp()) return null;
   if(studying()) return null; // العملة قيد الدراسة — لا دخول قبل اكتمال بصمتها
-  // تهدئة ما بعد الخسارة: إغلاق خاسر حديث بنفس الاتجاه = لا دخول جديد لخمس دقائق
-  if(!S.position&&S._lossAt&&S._lossAt.side===S.config.direction&&Date.now()-S._lossAt.at<300000) return null;
+  // هدنة الخسارة المخففة: خسارتان متتاليتان بنفس الاتجاه خلال دقيقتين فقط — لا شلل 5 دقائق لخسارة واحدة
+  if(!S.position&&S._lossStreak&&S._lossStreak.side===S.config.direction&&
+    S._lossStreak.n>=2&&Date.now()-S._lossStreak.at<120000) return null;
   const flipping=!!(S.position&&S.config.direction!==S.position.side);
   if(addsBlocked()&&!flipping) return null;
   if(flipping){ if(S.lastHuntAt&&Date.now()-S.lastHuntAt<120000) return null;
@@ -1043,7 +1110,6 @@ function huntTrigger(p){ if(S.status!=='running'||!p) return null;
     return packHunt(p); }
   if(toxicBlocked(S.config.direction)) return null;
   if(S.position){ if(!inAddZone(p)) return null; }
-  else if(!huntAligned()) return null;
   if(S.startedAt&&Date.now()-S.startedAt<SCOUT_MS&&filledAdds()>=1) return null;
   if(S.lastAddAt&&Date.now()-S.lastAddAt<ADD_COOLDOWN) return null;
   trailHuntAnchor(p);
@@ -1054,19 +1120,13 @@ function huntTrigger(p){ if(S.status!=='running'||!p) return null;
     const cover=(S.position.side==='short'&&pk.side==='buy')||
       (S.position.side==='long'&&pk.side==='sell');
     return cover?null:pk; }
-  // محفّز انحراف السعر عن المارك: ابتعاد ≥0.15% باتجاه يجعل العودة نحو المارك مع اتجاه البوت = صيد ارتداد
-  const mk=S.markPrice||0;
-  if(mk>0){ const dev=(p-mk)/mk;
-    if(Math.abs(dev)>=0.0015&&((dev>0&&S.config.direction==='short')||(dev<0&&S.config.direction==='long')))
-      return packHunt(p); }
-  // محفّز صيد السلاحف: اختراق قمة/قاع نافذة المسار ثم فشل سريع (عودة خلال 10 ثوانٍ) = فخ سيولة باتجاه البوت
-  if(S._brk&&Date.now()-S._brk.at<10000){
-    const soup=(S._brk.side==='up'&&p<S._brk.level&&S.config.direction==='short')||
-      (S._brk.side==='down'&&p>S._brk.level&&S.config.direction==='long');
-    if(soup){ S._brk=null; return packHunt(p); } }
-  const pct=(p-S.huntAnchor)/S.huntAnchor*100, need=effectiveHuntPct();
-  const hit=S.config.direction==='short'?pct<=-need:pct>=need;
-  return hit?packHunt(p):null; }
+  // فلسفة الصيد: لا دخول إلا بإشارة، ولا منع إلا بفيتو خطر قوي مثبت
+  const veto=dangerVeto(p);
+  if(veto){ if(!S._vetoAt||Date.now()-S._vetoAt>120000){ S._vetoAt=Date.now();
+      pushLog('info','فيتو خطر منع صفقة: '+veto); } return null; }
+  const sig=huntSignals(p); if(!sig.length) return null;
+  S._lastSig=sig.slice(0,3).join(' · ');
+  return packHunt(p); }
 function maybeHunt(p){ const hit=huntTrigger(p); if(!hit) return false;
   S.lastHuntAt=Date.now(); S.huntAnchor=p;
   const fee=feeFor(hit.qty*(S.multiplier||1)*p,true); S.feesPaid+=fee;
@@ -1082,7 +1142,9 @@ function maybeHunt(p){ const hit=huntTrigger(p); if(!hit) return false;
     S.grid.push({id:uid('hunt'),clientOid:uid('oid'),side:hit.side,price:p,qty:d.addedQty,
       status:'filled',reduceOnly:false,exchangeOrderId:null,filledAt:Date.now(),
       origin:'hunt',createdAt:Date.now(),lotId});
-    notify('صفقة فردية #'+S.huntCount+' — '+(hit.side==='sell'?'بيع':'شراء')+' @ '+fmtPx(p)); }
+    notify('صفقة فردية #'+S.huntCount+' — '+(hit.side==='sell'?'بيع':'شراء')+' @ '+fmtPx(p)+
+      (S._lastSig?' — '+S._lastSig:''));
+    S._lastSig=null; }
   if(S.position&&S.status==='running') syncPositionTp();
   S.lastWorkAt=Date.now(); if(d.addedQty>0) S.lastAddAt=Date.now();
   return true; }
@@ -1533,7 +1595,7 @@ export function saveCfg(v){
     // تصفير حالة الإشارات الجديدة — كل عملة تُقرأ من صفر بمعطياتها وحدها
     S._brk=null; S._ofi=0; S._ofiWin=[]; S._prevBook=null;
     S._btcImp=null; S._btcPrev=null; S._actHist=[]; S._actMed=0; S._actAt=0; S._tradeTs=[];
-    S._lossAt=null; S._guardPx=0; S._guardLogged=false;
+    S._lossStreak=null; S._lastSig=null; S._vetoAt=0; S._guardPx=0; S._guardLogged=false;
     setStreamSymbol(sym);
     // بصمة العملة الجديدة: معروفة وحديثة = إحماء قصير · جديدة = دراسة كاملة قبل التداول
     const pf=S.memory&&S.memory.profiles&&S.memory.profiles[sym];
