@@ -1602,6 +1602,8 @@ export async function saveKeys(k){
 export function clearKeys(){ S.keys=null; S.linkOk=false; S.exEquity=null; saveAll(); emit(); toast('حُذفت المفاتيح'); }
 export function saveCfg(v){
   const old=S.config.symbol;
+  const oldLv=S.config.leverage, oldN=S.config.levels,
+    oldStep=S.config.gridStepPct, oldBal=S.config.cycleBalance;
   const sym=(v.symbol||old).trim().toUpperCase();
   S.config.symbol=sym;
   S.config.displaySymbol=sym.replace(/USDTM$/i,'').replace(/^XBT$/i,'BTC');
@@ -1638,6 +1640,19 @@ export function saveCfg(v){
     startStudy(!!(pf&&Date.now()-pf.at<24*3600*1000));
     pushLog('server','انتقال إلى '+S.config.displaySymbol+' — أُلغيت حالة الزوج السابق'+
       (pf&&Date.now()-pf.at<24*3600*1000?' · بصمتها معروفة — إحماء قصير':' · تُدرس 60 ثانية قبل أي دخول')); }
+  else if(S.status==='running'&&
+    (oldLv!==S.config.leverage||oldN!==S.config.levels||
+     oldStep!==S.config.gridStepPct||oldBal!==S.config.cycleBalance)){
+    // تغيّر رأس المال/الرافعة/المستويات/الخطوة أثناء التشغيل: أعد بناء الشبكة فورًا
+    // بالأحجام والعدد الفعّال المحسوبين من القيم الجديدة — لا تبقَ شبكة بمعاملات قديمة
+    cancelPendingAdds();
+    if(S.config.mode==='live'&&S.keys) exCancelAll(sym).catch(()=>{});
+    const c=S.lastPrice||S.gridAnchor||(S.position?S.position.entry:0);
+    if(c>0){ const keep=S.grid.filter(g=>g.status==='filled'||g.status==='cancelled'||
+        (g.reduceOnly&&(g.status==='open'||g.status==='armed')));
+      S.grid=[...keep,...buildGrid(c)]; S.gridAnchor=c;
+      S.grid.sort((a,b)=>b.price-a.price); }
+    pushLog('server','أُعيد بناء الشبكة بالمعاملات الجديدة — '+effLevels()+' مستوى فعّال'); }
   saveAll(); emit(); toast('تم حفظ المعاملات');
 }
 
