@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   S, subscribe, initEngine, startBot, pauseBot, stopBot, newCycle,
   saveKeys, clearKeys, saveCfg, equity, desk, pulseAge, fmtPx, fmtUsd, fmtTime,
-  listContracts, memStepMult, memStats,
+  listContracts, memStepMult, memStats, effLevels,
 } from './engine';
 import { streamState } from './ws';
 import Chart from './Chart';
@@ -141,7 +141,7 @@ function HomeScreen() {
         <button className="btn acc" onClick={startBot}>{I.play}تشغيل</button>
         <button className="btn" onClick={pauseBot}>{I.pause}مؤقت</button>
         <button className="btn dgr" onClick={() => stopBot()}>{I.stop}إيقاف</button>
-        <button className="btn" onClick={newCycle}>{I.cycle}دورة</button>
+        <button className="btn" onClick={() => { if (window.confirm('دورة جديدة؟ يُغلق أي مركز مفتوح وتُمسح سجلات الصفقات والسيرفر — تبقى فقط ذاكرة التعلم.')) newCycle(); }}>{I.cycle}دورة</button>
       </div>
       <div className="subtle" style={{ textAlign: 'center', margin: '8px 0 12px' }}>
         {S.status === 'paused' ? 'مؤقت: لا صفقات جديدة — الجني مستمر'
@@ -152,7 +152,7 @@ function HomeScreen() {
 
       <div className="grid3">
         <div className="chip"><small>الرافعة</small><b>{'×' + S.config.leverage}</b></div>
-        <div className="chip"><small>المستويات</small><b>{S.config.levels}</b></div>
+        <div className="chip"><small>المستويات</small><b>{effLevels()}{effLevels() !== S.config.levels ? <span style={{ opacity: .55, fontSize: 10 }}> /{S.config.levels}</span> : null}</b></div>
         <div className="chip"><small>رصيد الدورة</small><b>{'$' + S.config.cycleBalance}</b></div>
         <div className="chip"><small>خطوة %</small><b>{S.config.gridStepPct}</b></div>
         <div className="chip"><small>صيد %</small><b>{S.config.huntPct}</b></div>

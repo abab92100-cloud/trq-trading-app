@@ -501,7 +501,7 @@ function contractsForLevel(p){ const c=S.config;
   return Math.max(1,Math.floor(raw*(S.regime?S.regime.sizeMult:1)*memSizeMult())); }
 // المستويات الفعّالة: رأس المال الصغير يُركَّز لا يُفتَّت —
 // عدد يضمن أن يكون صافي جني كل مستوى ≥ $0.15 بخطوة شبكة واحدة بعد الرسوم
-function effLevels(){ const c=S.config;
+export function effLevels(){ const c=S.config;
   const step=Math.max(0.12,addStepPct())/100;
   const fees=(S.makerFee||0.0002)+(S.takerFee||0.0006);
   const minN=0.15/Math.max(0.0005,step-fees); // أقل قيمة صفقة تحقق جنيًا مجديًا
@@ -1571,6 +1571,8 @@ export function newCycle(){ const rolled=Math.max(0.01,
     // لا تيتيم لمراكز حقيقية: دورة جديدة بمركز مفتوح تُغلقه على المنصة أولًا
     if(S.position) exCloseQty(S.config.symbol,S.position.side,S.position.size)
       .catch(e=>pushLog('error','إغلاق مركز الدورة السابقة فشل: '+(e.message||e))); }
+  // نافذة تجاهل 12 ثانية: لا تستعد المركز المغلق للتو كـ«شبح» قبل أن تسوّيه المنصة
+  S.ignoreExchangeUntil=Date.now()+12000;
   // قبل المسح: الذاكرة القوية تتعلم حصيلة الدورة — وهي الوحيدة التي تبقى
   const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
   mem.cycles++; mem.totalPnl=Math.round((mem.totalPnl+S.realizedPnl-S.feesPaid)*100)/100;
