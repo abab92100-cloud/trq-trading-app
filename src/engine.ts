@@ -892,37 +892,26 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     const entryFee=lot?lot.fees:feeFor(tp.qty*(S.multiplier||1)*entry,false);
     const net=pnl-entryFee-exitFee;
     const stuck=!!(S.position&&adversePct(p)>=0.45);
-    // حد ربح حقيقي: لا صفقة تُغلق بمبالغ تافهة — على الأقل 0.15% من قيمة المركز صافيًا بعد الرسوم
-    const notional=tp.qty*(S.multiplier||1)*entry;
-    const minNet=Math.max(stuck?0.10:0.15, notional*0.003);
+    // حد الجني بطلب المالك: $0.15 صافيًا بعد الرسوم لكل صفقة — لا جني تافهًا ولا احتفاظ حتى الخسارة
+    const minNet=0.15;
 
-    // ——— الجني الذكي المتحرك ———
-    // ما دام السعر يتقدم لصالحنا نتبعه ونرفع الربح المقفل،
-    // وعند أول ارتداد حقيقي نغلق فورًا — الربح لا يعود خسارة أبدًا
-    if(tp.trailBest!=null){
-      const better=side==='short'?p<tp.trailBest:p>tp.trailBest;
-      if(better) tp.trailBest=p;
-      const retrace=side==='short'?(p-tp.trailBest)/tp.trailBest*100
-                                  :(tp.trailBest-p)/tp.trailBest*100;
-      // مسافة التتبع متكيفة مع التقلب الفعلي للسوق
-      const vol=retStdev()||0.05;
-      let dist=Math.max(0.08,Math.min(0.35,vol*1.8));
-      // موجة قوية لصالحنا (اتجاه+صدمة متوافقان مع المركز): وسّع التتبع — دع الربح يركض
-      const rg=S.regime||{trend:'range'};
-      const aligned=(side==='long'&&rg.trend==='up')||(side==='short'&&rg.trend==='down');
-      if(aligned&&rg.shock) dist=Math.min(0.5,dist*1.4);
-      // انحراف حيتان ضد المركز أثناء التتبع = انعكاس وشيك — ضيّق التتبع واقفل الربح بسرعة
-      const dv=cvdDivergence();
-      if((side==='short'&&dv===1)||(side==='long'&&dv===-1)) dist*=0.6;
-      if(retrace>=dist||net<=Math.max(0.08,notional*0.0008)) fillLevel(tp.id,p,true);
+    // ——— تتبع الربح بالدولار (وليس بالسعر) ———
+    // يتفعّل التتبع فور بلوغ الصافي $0.20، ويتبع القمة بفجوة $0.05:
+    // أي تراجع يعيد الصافي إلى (القمة − $0.05) — وبحد أدنى $0.15 — يُجنى الربح فورًا.
+    if(tp.peakNet!=null){
+      if(net>tp.peakNet) tp.peakNet=net;
+      const stop=Math.max(0.15,tp.peakNet-0.05);
+      // هروب طارئ فقط: مركز عالق عكسيًا عميقًا يُقبل فيه خروج أصغر بدل كارثة
+      const escape=stuck&&net>=0.10;
+      if(net<=stop||escape) fillLevel(tp.id,p,true);
       continue; }
 
     if(net<minNet) continue;
     // تسامح بمقدار نصف تكة — «السعر عند المستوى» يُفعّل التتبع فورًا
     const tol=Math.min(S.tickSize>0?S.tickSize*0.5:1e-12, Math.abs(tp.price)*0.0005);
     const crossed=tp.side==='sell'?p>=tp.price-tol:p<=tp.price+tol;
-    // بدل الإغلاق عند أول لمسة: فعّل التتبع لالتقاط حركة أكبر إن استمرت
-    if(crossed||net>=minNet*1.15) tp.trailBest=p; } }
+    // يتفعّل التتبع ببلوغ $0.20 صافيًا، أو ببلوغ مستوى الجني مع صافٍ مجدٍ
+    if(net>=0.20||crossed) tp.peakNet=net; } }
 function trailHuntAnchor(p){ if(!p||S.status!=='running') return;
   if(!S.huntAnchor){S.huntAnchor=p;return;}
   if(S.config.direction==='short'){ if(p>S.huntAnchor)S.huntAnchor=p; }
