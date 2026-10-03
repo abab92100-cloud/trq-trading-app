@@ -3,3 +3,6 @@ dist
 android
 *.local
 .DS_Store
+
+# allow local native plugin android sources
+!plugins/trq-native/android
