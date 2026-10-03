@@ -925,7 +925,33 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     const tol=Math.min(S.tickSize>0?S.tickSize*0.5:1e-12, Math.abs(tp.price)*0.0005);
     const crossed=tp.side==='sell'?p>=tp.price-tol:p<=tp.price+tol;
     // يتفعّل التتبع ببلوغ $0.20 صافيًا، أو ببلوغ مستوى الجني مع صافٍ مجدٍ
-    if(net>=0.20||crossed) tp.peakNet=net; } }
+    if(net>=0.20||crossed) tp.peakNet=net; }
+
+  // ——— حارس صافي المركز كاملًا ———
+  // فتيلة دقيقة واحدة قد ترفع صافي المركز فوق دولار بينما كل مستوى منفردًا تحت $0.20
+  // فلا يتسلح أحدها — هنا يُراقب المجموع: تسليح عند $0.30 وجني الكل عند تراجع $0.08 من القمة
+  if(S.position){ const pos=S.position, qty=pos.size||0;
+    if(qty>0){ const sgn=pos.side==='short'?1:-1;
+      const netAll=sgn*(pos.entry-p)*(S.multiplier||1)*qty
+        -qty*(S.multiplier||1)*(pos.entry*S.makerFee+p*S.takerFee);
+      if(S._posPeakNet==null){ if(netAll>=0.30){ S._posPeakNet=netAll;
+          pushLog('server','⚡ صافي المركز $'+netAll.toFixed(2)+' — تتبع الانزلاق مُسلّح'); } }
+      else{ if(netAll>S._posPeakNet) S._posPeakNet=netAll;
+        const stopAll=Math.max(0.15,S._posPeakNet-0.08);
+        if(netAll<=stopAll){ S._posPeakNet=null;
+          pushLog('server','⚡ صيد انزلاق ✓ — تراجع الصافي من القمة، جني المركز كاملًا');
+          flattenAt(p,'صيد انزلاق'); return; } } } }
+  else S._posPeakNet=null;
+
+  // ——— درع الانزلاق العكسي ———
+  // حركة حادة ضد المركز خلال ثوانٍ: ألغِ تسليح المستويات فورًا — إضافة في شلال = متوسط كارثي
+  const pv=S._harvPrev;
+  if(S.position&&pv&&pv.px>0){ const dt=Date.now()-pv.at;
+    if(dt>0&&dt<6000){ const adv=(S.position.side==='short'?(p-pv.px):(pv.px-p))/pv.px*100;
+      if(adv>=0.35){ cancelPendingAdds();
+        if(!S._advSpkAt||Date.now()-S._advSpkAt>60000){ S._advSpkAt=Date.now();
+          pushLog('server','⚡ انزلاق عكسي '+adv.toFixed(2)+'% خلال '+Math.round(dt/1000)+'ث — أُلغي التسليح حتى يهدأ السعر'); } } } }
+  S._harvPrev={px:p,at:Date.now()}; }
 function trailHuntAnchor(p){ if(!p||S.status!=='running') return;
   if(!S.huntAnchor){S.huntAnchor=p;return;}
   if(S.config.direction==='short'){ if(p>S.huntAnchor)S.huntAnchor=p; }
