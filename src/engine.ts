@@ -328,7 +328,8 @@ async function exPing(){
 async function exPlaceStopGuard(){ if(S.config.mode!=='live'||!S.keys||!S.position) return;
   const liq=S.exLiqPrice||S.position.liquidation||S.liqPrice||0; if(!liq) return;
   const sh=S.position.side==='short';
-  const gp=sh?liq*1.015:liq*0.985;
+  // يقف قبل التصفية مباشرة وبعد خط هروب التطبيق (0.985/1.015) — خلف التصفية لا يحمي شيئًا أبدًا
+  const gp=sh?liq*0.99:liq*1.01;
   if(S._guardPx&&Math.abs(gp-S._guardPx)/S._guardPx<0.005&&Date.now()-(S._guardAt||0)<60000) return;
   try{ await kcPrivate('POST','/api/v1/orders',{clientOid:'grd_'+Date.now().toString(36),
       symbol:S.config.symbol,type:'market',side:sh?'buy':'sell',
@@ -890,8 +891,10 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
     const rg=S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي';
     const ro=mp.regimes&&mp.regimes[rg];
     if(ro&&ro.n>=8&&ro.pnl<0&&smWR(ro)<0.32) return false; }
-  // تأكيد النشاط: شريط صفقات أضعف من نصف وسيطه = صيد في سوق ميت — ارفض
-  const am=S._actMed||0; if(am>=8&&S.tape.length<am*0.5) return false;
+  // تأكيد النشاط: معدل صفقات آخر دقيقة أدنى من نصف وسيطه التاريخي = سوق ميت — ارفض
+  const am=S._actMed||0;
+  if(am>=10){ const cut=Date.now()-60000, rate=(S._tradeTs||[]).filter(t=>t>=cut).length;
+    if(rate<am*0.5) return false; }
   // فلتر قرب الجدار + تطبيع OFI على وسيط أحجام مستويات الدفتر
   const ob=S.orderBook,lp=S.lastPrice||0;
   if(ob&&ob.bids.length&&ob.asks.length&&lp>0){ const medL=medLevelSz(ob);
@@ -1257,9 +1260,10 @@ function onStreamTick(d){
         for(let i=0;i<tt.length-1;i++){ if(tt[i]>hi)hi=tt[i]; if(tt[i]<lo)lo=tt[i]; }
         if(hi>-Infinity&&d.price>hi) S._brk={side:'up',at:now,level:hi};
         else if(lo<Infinity&&d.price<lo) S._brk={side:'down',at:now,level:lo}; } }
-    // عينة نشاط الشريط كل دقيقة — وسيطها مرجع «السوق الميت» في بوابة الصيد
+    // عينة نشاط السوق كل دقيقة: معدل الصفقات الفعلي في آخر 60 ثانية (طول الشريط مخزّن مشبع لا يقيس شيئًا)
     if(!S._actAt||now-S._actAt>60000){ S._actAt=now;
-      S._actHist=[...(S._actHist||[]),S.tape.length].slice(-30);
+      const cut=now-60000, rate=(S._tradeTs||[]).filter(t=>t>=cut).length;
+      S._actHist=[...(S._actHist||[]),rate].slice(-30);
       const h=[...S._actHist].sort((a,b)=>a-b); S._actMed=h[Math.floor(h.length/2)]||0; }
     // تنفيذ فوري لجني الربح مع كل نبضة سعر — لا انتظار لدورة المحرك
     if(S.status==='running'){ try{ harvestRipe(d.price); }catch(e){} }
@@ -1282,6 +1286,7 @@ function onStreamTick(d){
   if(d.trade&&d.trade.price>0){
     S.lastPrice=d.trade.price; S.lastTickAt=now;
     S.tape=[d.trade,...S.tape].slice(0,32);
+    S._tradeTs=[...(S._tradeTs||[]),now].slice(-300); // طوابع زمنية — لقياس معدل الصفقات الحقيقي
     S.cvd+=d.trade.side==='buy'?d.trade.size:-d.trade.size;
     // مسار CVD — لكشف انحراف الحيتان (السعر عكس التدفق)
     if(!S._cvdAt||now-S._cvdAt>1500){ S.cvdTrail=[...(S.cvdTrail||[]),{t:now,cvd:S.cvd}].slice(-90); S._cvdAt=now; } }
@@ -1512,7 +1517,7 @@ export function saveCfg(v){
     S.liqPrice=null; S.exLiqPrice=null; S.huntAnchor=null; S.gridAnchor=null;
     // تصفير حالة الإشارات الجديدة — كل عملة تُقرأ من صفر بمعطياتها وحدها
     S._brk=null; S._ofi=0; S._ofiWin=[]; S._prevBook=null;
-    S._btcImp=null; S._btcPrev=null; S._actHist=[]; S._actMed=0;
+    S._btcImp=null; S._btcPrev=null; S._actHist=[]; S._actMed=0; S._actAt=0; S._tradeTs=[];
     S._lossAt=null; S._guardPx=0; S._guardLogged=false;
     setStreamSymbol(sym);
     // بصمة العملة الجديدة: معروفة وحديثة = إحماء قصير · جديدة = دراسة كاملة قبل التداول
