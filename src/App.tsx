@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   S, subscribe, initEngine, startBot, pauseBot, stopBot, newCycle,
   saveKeys, clearKeys, saveCfg, equity, desk, pulseAge, fmtPx, fmtUsd, fmtTime,
-  listContracts, memStepMult, memStats, effLevels,
+  listContracts, memStepMult, memStats, effLevels, scanRadar,
 } from './engine';
 import { streamState } from './ws';
 import Chart from './Chart';
@@ -26,6 +26,7 @@ const I = {
   pause: <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>,
   stop: <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>,
   cycle: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></svg>,
+  radar: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1" fill="currentColor"/><path d="M12 12 18 6"/></svg>,
 };
 
 /* عرض الرمز بدون لاحقة M الخاصة بعقود KuCoin — SHIBUSDTM ← SHIB/USDT */
@@ -175,6 +176,57 @@ function HomeScreen() {
           {'رسوم: $' + S.feesPaid.toFixed(2) + ' · مفتوح: ' + d.open.length}
         </div>
       </div>
+    </section>
+  );
+}
+
+/* ---------- رادار الفرص ---------- */
+function RadarScreen() {
+  const r = S.radar, list = r ? r.list : [];
+  const cur = list.find(l => l.symbol === S.config.symbol);
+  const [busy, setBusy] = useState(false);
+  const scan = async () => { setBusy(true); try { await scanRadar(); } finally { setBusy(false); } };
+  return (
+    <section>
+      <div className="card">
+        <div className="row">
+          <b>📡 رادار الفرص</b>
+          <button className="btn" style={{ padding: '4px 12px', fontSize: 12 }} onClick={scan} disabled={busy}>
+            {busy ? 'يمسح…' : 'مسح الآن'}
+          </button>
+        </div>
+        <div className="subtle" style={{ marginTop: 4 }}>
+          {r ? 'آخر مسح: ' + fmtTime(r.at) + ' — يتحدث تلقائيًا كل 3 دقائق' : 'لم يُمسح بعد — اضغط «مسح الآن»'}
+        </div>
+        {cur ? (
+          <div className="row" style={{ marginTop: 8 }}>
+            <span>عملتك الحالية <b>{cur.disp}</b></span>
+            <span className="badge g">{cur.grade} {cur.score}</span>
+          </div>
+        ) : null}
+      </div>
+      {list.slice(0, 10).map((l, i) => (
+        <div className="card" key={l.symbol} style={{ padding: '10px 12px' }}>
+          <div className="row">
+            <b>{(i + 1) + '. ' + l.disp}{l.symbol === S.config.symbol ? ' ✓' : ''}</b>
+            <span className={'badge ' + (l.grade === '🟢' ? 'g' : l.grade === '🟡' ? 'b' : '')}>{l.grade + ' ' + l.score}</span>
+          </div>
+          <div className="subtle" style={{ marginTop: 4 }}>
+            {l.state + ' · تذبذب ' + l.vol + '% · 24س ' + (l.chg >= 0 ? '+' : '') + l.chg + '%' + (l.why.length ? ' · ' + l.why.join('، ') : '')}
+          </div>
+          {l.symbol !== S.config.symbol && l.score >= 65 ? (
+            <button className="btn acc" style={{ marginTop: 8, width: '100%', padding: '6px' }}
+              onClick={() => {
+                if (S.position) { window.alert('أغلق المركز الحالي أولًا ثم بدّل'); return; }
+                if (window.confirm('التبديل إلى ' + l.disp + '؟ تُلغى حالة الزوج الحالي وتُدرس العملة الجديدة قبل الدخول.'))
+                  saveCfg({ symbol: l.symbol, leverage: S.config.leverage, levels: S.config.levels, gridStepPct: S.config.gridStepPct, huntPct: S.config.huntPct, cycleBalance: S.config.cycleBalance, directionMode: S.config.directionMode, mode: S.config.mode, sound: S.sound, soundTone: S.soundTone });
+              }}>
+              تبديل إلى {l.disp}
+            </button>
+          ) : null}
+        </div>
+      ))}
+      {!list.length ? <div className="card subtle" style={{ textAlign: 'center' }}>الرادار يقرأ كل عقود المنصة ويرتّبها: الأعلى درجة = أنسب بيئة للشبكة الآن</div> : null}
     </section>
   );
 }
@@ -451,12 +503,14 @@ export default function App() {
       </header>
       <main>
         {tab === 'home' && <HomeScreen />}
+        {tab === 'radar' && <RadarScreen />}
         {tab === 'pos' && <PosScreen />}
         {tab === 'jrnl' && <JournalScreen />}
         {tab === 'set' && <SettingsScreen />}
       </main>
       <nav className="tabbar">
         <button data-tab="home" className={tab === 'home' ? 'on' : ''} onClick={() => setTab('home')}>{I.home}الرئيسية</button>
+        <button data-tab="radar" className={tab === 'radar' ? 'on' : ''} onClick={() => setTab('radar')}>{I.radar}الرادار</button>
         <button data-tab="pos" className={tab === 'pos' ? 'on' : ''} onClick={() => setTab('pos')}>{I.pos}المراكز</button>
         <button data-tab="jrnl" className={tab === 'jrnl' ? 'on' : ''} onClick={() => setTab('jrnl')}>{I.jrnl}السجل</button>
         <button data-tab="set" className={tab === 'set' ? 'on' : ''} onClick={() => setTab('set')}>{I.set}إعدادات</button>

@@ -280,6 +280,81 @@ export function listContracts(){
   });
 }
 
+/* ================================================================
+   رادار الفرص — مسح كل عقود المنصة وترتيبها بدرجة ملاءمة للشبكة
+   مرحلتان: (1) كل العقود بحجم 24 ساعة من طلب واحد
+   (2) أعلى 18 سيولةً: شموع 15د + أفضل عرض/طلب لقياس التقلب والسبريد والاتجاه
+   ================================================================ */
+function radarScore(x){ // x: {vol,spread,chg,trendPct,turnover}
+  let sc=50; const why=[];
+  // التقلب المتحقق لكل شمعة 15د: الشبكة تريد ذبذبة كافية لا ميتة ولا وحشية
+  if(x.vol>=0.18&&x.vol<=1.1){ sc+=18; why.push('تذبذب مثالي'); }
+  else if(x.vol>1.1&&x.vol<=2){ sc+=6; why.push('تذبذب حاد'); }
+  else if(x.vol<0.18){ sc-=14; why.push('سوق ميت'); }
+  else { sc-=10; why.push('تذبذب وحشي'); }
+  // السبريد: واسع يأكل ربح المستوى
+  if(x.spread>0){ if(x.spread<=0.03) sc+=12; else if(x.spread<=0.08) sc+=6;
+    else if(x.spread>0.2){ sc-=16; why.push('سبريد واسع'); } }
+  // السيولة: دوران 24 ساعة بالدولار
+  if(x.turnover>=5e7) sc+=10; else if(x.turnover>=1e7) sc+=6;
+  else if(x.turnover<1e6){ sc-=14; why.push('سيولة ضعيفة'); }
+  // نوع السوق: العرضي المتذبذب بيئة الشبكة المثالية؛ الاتجاه القوي يفيد الصيد لا الشبكة
+  const a=Math.abs(x.trendPct);
+  if(a<1.2){ sc+=8; x.state='عرضي متذبذب'; }
+  else if(a<3.5){ sc+=4; x.state=x.trendPct>0?'صاعد':'هابط'; }
+  else { sc-=4; x.state=x.trendPct>0?'صاعد بقوة':'هابط بقوة'; why.push('اتجاه حاد'); }
+  // حركة 24 ساعة المتطرفة = إرهاق أو مخاطرة
+  if(Math.abs(x.chg)>12){ sc-=6; why.push('حركة يوم متطرفة'); }
+  return {score:clamp(Math.round(sc),0,100),why}; }
+
+export async function scanRadar(){
+  if(S._radarBusy) return S.radar; S._radarBusy=true;
+  try{
+    const all=await kcPublic('/api/v1/contracts/active',6000);
+    const rows=(all||[]).filter(c=>c&&c.symbol&&/USDTM$/i.test(c.symbol)&&c.status==='Open')
+      .map(c=>({symbol:c.symbol,
+        turnover:+(c.turnoverOf24h??c.turnover24h??c.volumeOf24h??c.volume24h??0)||0,
+        chg:+(c.priceChgPct??0)*100||0}))
+      .filter(r=>r.turnover>0)
+      .sort((a,b)=>b.turnover-a.turnover).slice(0,18);
+    const det=await Promise.all(rows.map(async r=>{
+      const out={...r,vol:0,spread:0,trendPct:0,price:0};
+      try{ const ks=await fetchKlines(r.symbol,15);
+        if(ks.length>=20){ const last=ks.slice(-24);
+          let v=0; for(const k of last) v+=(k.h-k.l)/k.c; out.vol=v/last.length*100;
+          out.price=ks[ks.length-1].c;
+          out.trendPct=(out.price-ks[ks.length-20].o)/ks[ks.length-20].o*100; }
+      }catch(e){}
+      try{ const t=await fetchTicker(r.symbol);
+        const bb=+t.bestBidPrice||0, ba=+t.bestAskPrice||0;
+        if(bb>0&&ba>0) out.spread=(ba-bb)/((ba+bb)/2)*100;
+        if(!out.price) out.price=+t.price||0; }catch(e){}
+      return out; }));
+    const list=det.filter(d=>d.price>0).map(d=>{ const s=radarScore(d);
+      return {symbol:d.symbol,disp:d.symbol.replace(/USDTM$/i,'').replace(/^XBT/i,'BTC'),
+        price:d.price,score:s.score,why:s.why,state:d.state||'—',
+        vol:+d.vol.toFixed(2),chg:Math.round(d.chg*10)/10,
+        grade:s.score>=65?'🟢':s.score>=45?'🟡':'🔴'}; })
+      .sort((a,b)=>b.score-a.score);
+    S.radar={at:Date.now(),list};
+    // توصية التبديل: عملتي الحالية ضعيفة وأخرى أقوى منها بفارق واضح
+    const cur=list.find(l=>l.symbol===S.config.symbol);
+    const top=list[0];
+    if(top&&cur&&top.symbol!==cur.symbol&&top.score-cur.score>=18&&cur.score<50){
+      if(!S._radarTipAt||Date.now()-S._radarTipAt>1800000){ S._radarTipAt=Date.now();
+        pushLog('server','📡 رادار: '+cur.disp+' ضعيفة ('+cur.score+') بينما '+top.disp+
+          ' '+top.state+' بدرجة '+top.score+' — يُنصح بالتبديل بعد إغلاق أي مركز');
+        toast('📡 الرادار يقترح '+top.disp+' بدل '+cur.disp);
+        nativeNotify('📡 فرصة أقوى',top.disp+' '+top.state+' — درجة '+top.score+' مقابل '+cur.score+' لعملتك'); } }
+    else if(top&&!cur&&top.score>=70){
+      if(!S._radarTipAt||Date.now()-S._radarTipAt>1800000){ S._radarTipAt=Date.now();
+        pushLog('server','📡 رادار: '+top.disp+' '+top.state+' بدرجة '+top.score+' — أقوى فرصة الآن'); } }
+    emit(); saveAll();
+    return S.radar;
+  }catch(e){ return S.radar; }
+  finally{ S._radarBusy=false; }
+}
+
 async function exPosition(symbol){
   const raw=await kcPrivate('GET','/api/v1/position?symbol='+encodeURIComponent(symbol));
   const p=Array.isArray(raw)?raw[0]:raw;
@@ -1683,6 +1758,9 @@ export function initEngine(){
     exPing().then(eq=>{ if(eq!=null){ S.exEquity=eq; S.linkOk=true; } })
       .catch(()=>{ S.linkOk=false; }); };
   refreshBal(); setInterval(refreshBal,20000);
+  // رادار الفرص: مسح شامل كل 3 دقائق — أول قراءة بعد استقرار القناة
+  setTimeout(()=>{ scanRadar().catch(()=>{}); },22000);
+  setInterval(()=>{ scanRadar().catch(()=>{}); },180000);
   // البقاء الصوتي الصامت: يعمل دائمًا على الجوال حتى لا يُخنق المحرك بإطفاء الشاشة
   startSilentKeepAlive();
   // خدمة أمامية + استثناء البطارية — بقاء حقيقي في الخلفية لا يعتمد على الحيل الصوتية وحدها
