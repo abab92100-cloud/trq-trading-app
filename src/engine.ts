@@ -162,9 +162,11 @@ function loadAll(){ try{
     cvd:rt.cvd||0,huntCount:rt.huntCount||0,lastPrice:rt.lastPrice??null,
     markPrice:rt.markPrice??null,activeCycle:rt.activeCycle||null,status:rt.status||'idle',
     history:rt.history||[],logs:rt.logs||[]}); }
-  // startedAt لا يُحفظ — الجلسة المستعادة تعمل تبدأ إحماءً قصيرًا جديدًا
-  // (وإلا بقي startedAt فارغًا فحُظر الصيد للأبد) + إعادة تحقق قصيرة من بصمة العملة
-  if(S.status==='running'){ S.startedAt=Date.now(); startStudy(true); }
+  // لا استئناف تلقائي أبدًا: البوت لا يعمل بعد فتح التطبيق إلا بضغطة «تشغيل» من المالك.
+  // جلسة كانت تعمل تُستعاد «متوقفة مؤقتًا» — يبقى الجني والحارس يحميان أي مركز مفتوح،
+  // لكن لا صفقة جديدة ولا صيد حتى يقرر المالك
+  if(S.status==='running'){ S.status='paused';
+    pushLog('info','استُعيدت الجلسة متوقفة مؤقتًا — اضغط «تشغيل» للبدء'); }
   const mem=JSON.parse(localStorage.getItem('trq:mem')||'null');
   if(mem&&mem.pairs) S.memory=mem;
   // إصدار الذاكرة: كل ترقية استراتيجية تسقط قيود الماضي المخزنة — التعلم يبدأ بقواعد اليوم
@@ -1046,21 +1048,13 @@ function warmedUp(){ if(!S.startedAt||Date.now()-S.startedAt<15000) return false
   if((S.tape||[]).length<20) return false;
   return true; }
 // قراءة سجل مع نسيان تدريجي: عمر نصف 10 أيام — ذنب قديم يبهت أثره ولا يطارد للأبد
-function memRec(dir){ const mem=S.memory; if(!mem||!mem.pairs) return null;
-  const r=mem.pairs[S.config.symbol+':'+dir]; if(!r) return null;
-  const at=r.at||Date.now();
-  const f=Math.pow(0.5,Math.max(0,(Date.now()-at)/86400000)/10);
-  if(f>=0.99) return r;
-  return {...r,w:r.w*f,l:r.l*f,n:r.n*f,pnl:r.pnl*f}; }
+// ⚠️ ذاكرة التعلم معطّلة بطلب المالك: كانت قيودها المتراكمة تخنق الصفقات —
+// تعيد null دائمًا فتسقط كل البوابات (حجم/خطوة/صيد/حظر) إلى وضعها الحر الطبيعي
+function memRec(dir){ return null; }
 // معدل نجاح مُصحّح بايزيًا — العينة الصغيرة تُشدّ نحو الحياد بدل حكم متسرع
 function smWR(r){ return (r.w+1)/(r.n+2); }
-// سُلّم عقوبات بدل الحظر الثنائي: 0 حر · 1 حذر · 2 مقيّد · 3 محظور (بإعادة تأهيل)
-function sanctionLevel(dir){ const r=memRec(dir); if(!r||r.n<6) return 0;
-  const wr=smWR(r);
-  if(r.n>=20&&wr<0.25&&r.pnl<0) return 3;
-  if(r.n>=15&&wr<0.30&&r.pnl<0) return 2;
-  if(wr<0.45||r.pnl<0) return 1;
-  return 0; }
+// سُلّم العقوبات معطّل مع ذاكرة التعلم — لا قيود متراكمة من الماضي، القرار من السوق الحي فقط
+function sanctionLevel(dir){ return 0; }
 function toxicDir(dir){ return sanctionLevel(dir)>=2; }
 function toxicBlocked(dir){ const lv=sanctionLevel(dir);
   S._probation=false;
