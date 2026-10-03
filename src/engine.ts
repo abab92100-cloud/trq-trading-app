@@ -280,8 +280,17 @@ export function listContracts(){
    مرحلتان: (1) كل العقود بحجم 24 ساعة من طلب واحد
    (2) أعلى 18 سيولةً: شموع 15د + أفضل عرض/طلب لقياس التقلب والسبريد والاتجاه
    ================================================================ */
-function radarScore(x){ // x: {vol,spread,chg,trendPct,turnover}
+function radarScore(x){ // x: {vol,spread,chg,trendPct,turnover,price}
   let sc=50; const why=[];
+  // السعر المنخفض (العملات الصفرية) أولوية قصوى: برأس مال صغير تعطي عقودًا كثيرة
+  // بخطوات شبكة دقيقة وأرباحًا متكررة، والتصفية أبعد — الغالية تعطي عقدًا هشًا وتصفية قريبة
+  if(x.price>0){
+    if(x.price<0.001){ sc+=16; why.push('صفرية مثالية'); }
+    else if(x.price<0.01){ sc+=12; why.push('صفرية'); }
+    else if(x.price<0.1){ sc+=8; }
+    else if(x.price<1){ sc+=3; }
+    else if(x.price>100){ sc-=18; why.push('غالية — لا تناسب رأس المال'); }
+    else if(x.price>10){ sc-=8; why.push('سعر مرتفع'); } }
   // التقلب المتحقق لكل شمعة 15د: الشبكة تريد ذبذبة كافية لا ميتة ولا وحشية
   if(x.vol>=0.18&&x.vol<=1.1){ sc+=18; why.push('تذبذب مثالي'); }
   else if(x.vol>1.1&&x.vol<=2){ sc+=6; why.push('تذبذب حاد'); }
@@ -306,12 +315,17 @@ export async function scanRadar(){
   if(S._radarBusy) return S.radar; S._radarBusy=true;
   try{
     const all=await kcPublic('/api/v1/contracts/active',6000);
-    const rows=(all||[]).filter(c=>c&&c.symbol&&/USDTM$/i.test(c.symbol)&&c.status==='Open')
+    const rows0=(all||[]).filter(c=>c&&c.symbol&&/USDTM$/i.test(c.symbol)&&c.status==='Open')
       .map(c=>({symbol:c.symbol,
         turnover:+(c.turnoverOf24h??c.turnover24h??c.volumeOf24h??c.volume24h??0)||0,
+        price:+(c.lastTradePrice??c.markPrice??0)||0,
         chg:+(c.priceChgPct??0)*100||0}))
-      .filter(r=>r.turnover>0)
-      .sort((a,b)=>b.turnover-a.turnover).slice(0,18);
+      .filter(r=>r.turnover>0&&r.price>0);
+    // قاعدة المرشحين: الصفرية أولًا — رأس مال صغير يحتاج عملات رخيصة بسيولة،
+    // مع إبقاء بضع عملات كبيرة للمقارنة فقط
+    const cheap=rows0.filter(r=>r.price<1).sort((a,b)=>b.turnover-a.turnover).slice(0,16);
+    const big=rows0.filter(r=>r.price>=1).sort((a,b)=>b.turnover-a.turnover).slice(0,4);
+    const rows=[...cheap,...big];
     const det=await Promise.all(rows.map(async r=>{
       const out={...r,vol:0,spread:0,trendPct:0,price:0};
       try{ const ks=await fetchKlines(r.symbol,15);
