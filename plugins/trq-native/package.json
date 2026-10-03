@@ -1,0 +1,12 @@
+{
+  "name": "trq-native",
+  "version": "1.0.0",
+  "description": "TRQ native keep-alive: partial wake lock + native watchdog (CPU never sleeps, frozen engine auto-revived)",
+  "main": "index.js",
+  "license": "MIT",
+  "capacitor": {
+    "android": {
+      "src": "android"
+    }
+  }
+}

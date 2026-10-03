@@ -80,6 +80,21 @@ function startForegroundSvc(){ if(!(typeof window!=='undefined'&&window.Capacito
           localStorage.setItem('trq_bo_asked','1');
           BO.requestIgnoreBatteryOptimization().catch(()=>{}); } }).catch(()=>{});
   }catch(e){} }
+/* قفل استيقاظ المعالج + منعّاش أصلي: الإضافة المحلية TrqNative تمنع نوم المعالج
+   بإطفاء الشاشة، وتراقب نبض المحرك من خارج الويب فيو — إن جُمّد 90 ثانية
+   أُعيد تحميل التطبيق تلقائيًا فيُستأنف الاتصال والعمل دون تدخل */
+function startNativeKeepAlive(){ if(!(typeof window!=='undefined'&&window.Capacitor)) return;
+  const N=(window.Capacitor.Plugins||{}).TrqNative; if(!N) return;
+  try{ N.acquireWakeLock&&N.acquireWakeLock().catch(()=>{}); }catch(e){}
+  try{ N.startWatchdog&&N.startWatchdog().catch(()=>{}); }catch(e){}
+  if(!window.__trqHb) window.__trqHb=setInterval(()=>{
+    try{ N.heartbeat&&N.heartbeat().catch(()=>{}); }catch(e){} },15000);
+  pushLog('server','قفل المعالج والمنعّاش الذاتي فعّالان — المحرك لا ينام بإطفاء الشاشة'); }
+// علامة الإنعاش: المنعّاش الأصلي أعاد تحميل التطبيق بعد تجميد — يُسجَّل عند الإقلاع
+function logRevival(){ try{ const at=localStorage.getItem('trq_revived');
+  if(at){ localStorage.removeItem('trq_revived');
+    const s=Math.max(1,Math.round((Date.now()-+at)/1000));
+    pushLog('server','أُنعش التطبيق تلقائيًا بعد تجميد النظام له — استؤنف العمل خلال '+s+' ث'); } }catch(e){} }
 function clearNativeOngoing(){ const LN=lnPlugin(); if(LN) LN.cancel({notifications:[{id:7}]}).catch(()=>{}); }
 function notify(txt,kind){ if(S.sound){
     // نغمة مميزة لكل حدث: ربح = نغمتان صاعدتان · تحذير = تنبيه قوي · عادي = النغمة المختارة
@@ -1565,6 +1580,9 @@ export function initEngine(){
   startSilentKeepAlive();
   // خدمة أمامية + استثناء البطارية — بقاء حقيقي في الخلفية لا يعتمد على الحيل الصوتية وحدها
   startForegroundSvc();
+  // قفل المعالج + منعّاش أصلي: لا نوم للمؤقتات، وإنعاش تلقائي إن جمّد النظام الويب فيو
+  startNativeKeepAlive();
+  logRevival();
   // عند العودة من الخلفية: دورة محرك فورية لتعويض أي فترة خنق + إعادة فحص الأرباح الناضجة
   if(typeof document!=='undefined') document.addEventListener('visibilitychange',()=>{
     if(!document.hidden){ botTick().catch(()=>{});
