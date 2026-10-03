@@ -430,12 +430,12 @@ function contractsForLevel(p){ const c=S.config;
   return Math.max(1,Math.floor(raw*(S.regime?S.regime.sizeMult:1)*memSizeMult())); }
 // مضاعف خطوة الشبكة المستمد من الذاكرة القوية:
 // زوج/اتجاه رابح تاريخيًا → خطوة أضيق (التقاط أكثر) · خاسر → خطوة أوسع (حذر أكبر)
-export function memStepMult(){ const mem=S.memory; if(!mem||!mem.pairs) return 1;
-  const r=mem.pairs[S.config.symbol+':'+S.config.direction];
-  if(!r||r.n<6) return 1;
-  const wr=r.w/r.n;
+export function memStepMult(){ const lv=sanctionLevel(S.config.direction);
+  if(lv>=2) return 1.4; // مقيّد/محظور: خطوة أوسع — حذر أكبر
+  const r=memRec(S.config.direction); if(!r||r.n<6) return 1;
+  const wr=smWR(r);
   if(wr>=0.6&&r.pnl>0) return 0.8;
-  if(wr<0.4||r.pnl<0) return 1.4;
+  if(lv===1) return 1.25;
   return 1; }
 function addStepPct(){ return Math.max(0.12,S.config.gridStepPct)*memStepMult()*(S.regime?S.regime.stepMult:1)*profStepMult(); }
 function tooClose(a,b,st){ return a>0&&b>0&&Math.abs(a-b)/Math.max(a,b)*100<st*0.55; }
@@ -524,6 +524,7 @@ function lotNet(side,entry,exit,qty,fees){
 function applyDelta(side,qty,price){ const dir=side==='sell'?'short':'long';
   if(!S.position){ S.position={side:dir,size:qty,entry:price,leverage:S.config.leverage,
     unrealized:0,openedAt:Date.now(),liquidation:null};
+    S._exc={mae:0,mfe:0}; // انحرافات تُقاس من ولادة المركز
     return {realized:0,closedQty:0,addedQty:qty}; }
   const pos=S.position;
   const same=(pos.side==='short'&&side==='sell')||(pos.side==='long'&&side==='buy');
@@ -537,9 +538,13 @@ function applyDelta(side,qty,price){ const dir=side==='sell'?'short':'long';
   const leftover=qty-closeQty;
   if(leftover>1e-9){ S.position={side:dir,size:leftover,entry:price,
     leverage:S.config.leverage,unrealized:0,openedAt:Date.now(),liquidation:null};
+    S._exc={mae:0,mfe:0};
     return {realized:pnl,closedQty:closeQty,addedQty:leftover}; }
   return {realized:pnl,closedQty:closeQty,addedQty:0}; }
 function noteEntry(qty,price,fee,source){ const side=S.position?S.position.side:(source==='hunt'?S.config.direction:'short');
+  // لقطة ظروف الدخول لحظتها — تُختم على الصفقة عند إغلاقها في الذاكرة
+  S._entryCtx={rg:S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي',
+    ses:sessionOf(Date.now()),origin:source==='hunt'?'صيد':'شبكة',at:Date.now()};
   const label=source==='hunt'?'صفقة':'شبكة';
   const ex=S.journal.find(j=>j.status==='open'&&j.side===side);
   if(ex){ const t=ex.qty+qty; ex.entry=(ex.entry*ex.qty+price*qty)/t; ex.qty=t;
@@ -576,10 +581,21 @@ function learnTrade(side,pnl){ if(!Number.isFinite(pnl)) return;
   const mem=S.memory=S.memory||{pairs:{},cycles:0,totalPnl:0};
   const k=S.config.symbol+':'+(side||'short');
   const r=mem.pairs[k]=mem.pairs[k]||{w:0,l:0,n:0,pnl:0,streak:0,maxLoseStreak:0,slip:0,sessions:{},regimes:{}};
-  r.n++; r.pnl=Math.round((r.pnl+pnl)*10000)/10000;
+  r.n++; r.pnl=Math.round((r.pnl+pnl)*10000)/10000; r.at=Date.now(); // at: مرجع النسيان التدريجي
   if(pnl>0){ r.w++; r.streak=(r.streak>0?r.streak:0)+1; }
   else if(pnl<0){ r.l++; r.streak=(r.streak<0?r.streak:0)-1;
     r.maxLoseStreak=Math.max(r.maxLoseStreak||0,-r.streak); }
+  // لقطة ظروف الدخول — الذاكرة تتعلم «في أي ظرف أنجح» لا «أي زوج» فقط
+  const cx=S._entryCtx||{};
+  const ck=(cx.rg||'؟')+'|'+(cx.origin||'؟');
+  const cb=r.ctx=r.ctx||{}; const co=cb[ck]=cb[ck]||{w:0,l:0,n:0,pnl:0};
+  co.n++; co.pnl=Math.round((co.pnl+pnl)*10000)/10000;
+  if(pnl>0)co.w++; else if(pnl<0)co.l++;
+  // انحرافات الصفقة: أقصى ضرر (MAE) وأقصى ربح (MFE) بلغاه المركز — مادة الضبط الذاتي
+  if(S._exc&&(S._exc.mae>0||S._exc.mfe>0)){ r.maeN=(r.maeN||0)+1;
+    r.maeSum=Math.round(((r.maeSum||0)+S._exc.mae)*10000)/10000;
+    r.mfeSum=Math.round(((r.mfeSum||0)+S._exc.mfe)*10000)/10000;
+    S._exc={mae:0,mfe:0}; }
   // تعلم حسب توقيت اليوم — أي فترة ينجح فيها هذا الزوج/الاتجاه
   const ses=sessionOf(Date.now());
   const so=r.sessions[ses]=r.sessions[ses]||{w:0,l:0,n:0,pnl:0};
@@ -614,13 +630,13 @@ export function memStats(){ const mem=S.memory; const o={n:0,w:0,l:0,pnl:0,gross
   o.avgWin=Math.round(aw*100)/100; o.avgLoss=Math.round(al*100)/100;
   return o; }
 // حجم الصفقة التكيفي (Kelly مبسّط) — سلسلة نجاح تكبّر الحجم وسلسلة خسارة تصغّره
-function memSizeMult(){ const mem=S.memory; if(!mem||!mem.pairs) return 1;
-  const r=mem.pairs[S.config.symbol+':'+S.config.direction]; if(!r) return 1;
-  const st=r.streak||0;
-  if(st>=3) return 1.25;
-  if(st<=-3) return 0.5;
-  if(st<=-2) return 0.7;
-  return 1; }
+function memSizeMult(){ let m=1;
+  const r=memRec(S.config.direction);
+  if(r){ const st=r.streak||0;
+    if(st>=3) m=1.25; else if(st<=-3) m=0.5; else if(st<=-2) m=0.7; }
+  if(sanctionLevel(S.config.direction)>=2) m=Math.min(m,0.5); // مقيّد = نصف حجم
+  if(S._probation) m=Math.min(m,0.5); // صفقة إعادة التأهيل = نصف حجم
+  return m; }
 // انحراف الحيتان: سعر يتحرك عكس تدفق الصفقات الكبيرة = انعكاس محتمل
 // يرجع 1 (انحراف صعودي) / -1 (هبوطي) / 0 (لا انحراف)
 function cvdDivergence(){ const t=S.cvdTrail; if(!t||t.length<15) return 0;
@@ -819,19 +835,20 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
   const dv=cvdDivergence();
   if(short&&dv===1) return false;   // تدفق شرائي قوي تحت سعر هابط
   if(!short&&dv===-1) return false; // تدفق بيعي قوي فوق سعر صاعد
-  // بوابة الذاكرة القوية: اتجاه خاسر تاريخيًا على هذا الزوج يُحظر حتى تتحسن نتائجه
-  const mp=S.memory&&S.memory.pairs&&S.memory.pairs[S.config.symbol+':'+(short?'short':'long')];
-  if(mp&&mp.n>=6&&mp.pnl<0&&(mp.w/mp.n)<0.35){
+  // بوابة الذاكرة القوية (بتجانس بايزي): اتجاه خاسر بعينة حقيقية يُردع —
+  // الحظر الكامل للسام فقط في toxicBlocked، هنا تشدد الظرف لا إعدامه
+  const mp=memRec(short?'short':'long');
+  if(mp&&mp.n>=15&&mp.pnl<0&&smWR(mp)<0.30){
     if(!S._memBlockAt||Date.now()-S._memBlockAt>600000){ S._memBlockAt=Date.now();
-      pushLog('info','الذاكرة: اتجاه '+(short?'الشورت':'اللونغ')+' على هذا الزوج خاسر تاريخيًا ('+mp.w+'/'+mp.n+') — ممنوع مؤقتًا'); }
+      pushLog('info','الذاكرة: اتجاه '+(short?'الشورت':'اللونغ')+' على هذا الزوج خاسر بعينة كافية — ممنوع مؤقتًا'); }
     return false; }
   // بوابة التوقيت والظرف: فترة اليوم أو نوع السوق خاسر تاريخيًا لهذا الزوج/الاتجاه
   if(mp){
     const so=mp.sessions&&mp.sessions[sessionOf(Date.now())];
-    if(so&&so.n>=5&&so.pnl<0&&(so.w/so.n)<0.35) return false;
+    if(so&&so.n>=8&&so.pnl<0&&smWR(so)<0.32) return false;
     const rg=S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي';
     const ro=mp.regimes&&mp.regimes[rg];
-    if(ro&&ro.n>=5&&ro.pnl<0&&(ro.w/ro.n)<0.35) return false; }
+    if(ro&&ro.n>=8&&ro.pnl<0&&smWR(ro)<0.32) return false; }
   return true; }
 function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   const mag=Math.abs(S.biasScore);
@@ -863,14 +880,33 @@ function warmedUp(){ if(!S.startedAt||Date.now()-S.startedAt<15000) return false
   const b=S.orderBook||{}; if((b.bids||[]).length<5||(b.asks||[]).length<5) return false;
   if((S.tape||[]).length<20) return false;
   return true; }
-// اتجاه سام في الذاكرة القوية: عينة كافية + خسارة متراكمة + نجاح متدنٍ = حظر دخول —
-// الذاكرة كانت «تتعلم» دون أن تُجبر القرار فيعيد البوت الدخول في اتجاه خاسر متسلسل
-function toxicDir(dir){ const mem=S.memory; if(!mem||!mem.pairs) return false;
-  const r=mem.pairs[S.config.symbol+':'+dir];
-  return !!(r&&r.n>=6&&r.pnl<0&&(r.w/r.n)<0.35); }
-function toxicBlocked(dir){ if(!toxicDir(dir)) return false;
+// قراءة سجل مع نسيان تدريجي: عمر نصف 10 أيام — ذنب قديم يبهت أثره ولا يطارد للأبد
+function memRec(dir){ const mem=S.memory; if(!mem||!mem.pairs) return null;
+  const r=mem.pairs[S.config.symbol+':'+dir]; if(!r) return null;
+  const at=r.at||Date.now();
+  const f=Math.pow(0.5,Math.max(0,(Date.now()-at)/86400000)/10);
+  if(f>=0.99) return r;
+  return {...r,w:r.w*f,l:r.l*f,n:r.n*f,pnl:r.pnl*f}; }
+// معدل نجاح مُصحّح بايزيًا — العينة الصغيرة تُشدّ نحو الحياد بدل حكم متسرع
+function smWR(r){ return (r.w+1)/(r.n+2); }
+// سُلّم عقوبات بدل الحظر الثنائي: 0 حر · 1 حذر · 2 مقيّد · 3 محظور (بإعادة تأهيل)
+function sanctionLevel(dir){ const r=memRec(dir); if(!r||r.n<6) return 0;
+  const wr=smWR(r);
+  if(r.n>=20&&wr<0.25&&r.pnl<0) return 3;
+  if(r.n>=15&&wr<0.30&&r.pnl<0) return 2;
+  if(wr<0.45||r.pnl<0) return 1;
+  return 0; }
+function toxicDir(dir){ return sanctionLevel(dir)>=2; }
+function toxicBlocked(dir){ const lv=sanctionLevel(dir);
+  S._probation=false;
+  if(lv<3) return false;
+  // إعادة تأهيل: كل 3 ساعات صفقة استكشافية بنصف حجم — الحظر بلا إعادة اختبار عمى دائم
+  const r=S.memory.pairs[S.config.symbol+':'+dir];
+  if(!r.probAt||Date.now()-r.probAt>3*3600*1000){ r.probAt=Date.now(); S._probation=true;
+    pushLog('server','إعادة تأهيل — صفقة استكشافية بنصف حجم تختبر '+(dir==='short'?'الشورت':'اللونغ')+' المحظور');
+    saveAll(); return false; }
   if(!S._toxicLogAt||Date.now()-S._toxicLogAt>300000){ S._toxicLogAt=Date.now();
-    pushLog('server','اتجاه سام في الذاكرة — الدخول '+(dir==='short'?'شورت':'لونغ')+' محظور حتى تتحسن النتائج'); }
+    pushLog('server','اتجاه سام في الذاكرة — '+(dir==='short'?'الشورت':'اللونغ')+' محظور (يُعاد اختباره كل 3 ساعات)'); }
   return true; }
 
 /* ================================================================
@@ -906,11 +942,12 @@ function finishStudy(){ S.studyUntil=0; const a=S.studyAcc; S.studyAcc=null; if(
 function profStepMult(){ const p=profOf(); if(!p||!p.vol) return 1;
   return clamp(p.vol/0.05,0.7,2.2); }
 // التعلم يحسّن الدخول ولا يقيّده فقط: اتجاه ناجح لهذه العملة = اقتناص أسهل · خاسر = تشدد
-function memHuntMult(){ const mem=S.memory; if(!mem||!mem.pairs) return 1;
-  const r=mem.pairs[S.config.symbol+':'+S.config.direction];
-  if(!r||r.n<6) return 1; const wr=r.w/r.n;
+function memHuntMult(){ const lv=sanctionLevel(S.config.direction);
+  if(lv>=2) return 1.4;
+  const r=memRec(S.config.direction); if(!r||r.n<6) return 1;
+  const wr=smWR(r);
   if(wr>=0.6&&r.pnl>0) return 0.85;
-  if(wr<0.45||r.pnl<0) return 1.25;
+  if(lv===1) return 1.25;
   return 1; }
 function packHunt(p){ return {side:S.config.direction==='short'?'sell':'buy',qty:contractsForLevel(p)}; }
 function huntTrigger(p){ if(S.status!=='running'||!p) return null;
@@ -984,7 +1021,11 @@ function refreshLiq(){ const local=computeLiq();
   if(S.position) S.position.liquidation=S.liqPrice; }
 function markUnrealized(p){ if(S.position){
   S.position.unrealized=(S.position.side==='short'?1:-1)*
-    (S.position.entry-p)*(S.multiplier||1)*S.position.size; }
+    (S.position.entry-p)*(S.multiplier||1)*S.position.size;
+  // MAE/MFE: أقصى انحراف ضد المركز وأقصى تقدم لصالحه (%) طوال عمره
+  const fav=(S.position.side==='short'?(S.position.entry-p):(p-S.position.entry))/S.position.entry*100;
+  S._exc=S._exc||{mae:0,mfe:0};
+  if(fav>=0) S._exc.mfe=Math.max(S._exc.mfe,fav); else S._exc.mae=Math.max(S._exc.mae,-fav); }
   refreshLiq(); }
 function liqDanger(p){ const pos=S.position, liq=pos?(pos.liquidation||S.liqPrice):S.liqPrice;
   if(!pos||!liq||!p) return false;
