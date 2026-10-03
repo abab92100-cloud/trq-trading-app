@@ -65,6 +65,21 @@ export function startSilentKeepAlive(){ if(_kaCtx||!(typeof window!=='undefined'
     o.frequency.value=18; o.connect(g); g.connect(c.destination); o.start();
     setInterval(()=>{ if(_kaCtx&&_kaCtx.state!=='running') _kaCtx.resume().catch(()=>{}); },15000);
   }catch(e){} }
+/* خدمة أمامية أندرويد: إشعار دائم يُبقي العملية حية ويمنع النظام من قتلها في الخلفية،
+   + طلب استثناء «تحسين البطارية» مرة واحدة — السبب الثاني الأكبر لتوقف البوت أثناء النوم */
+function startForegroundSvc(){ if(!(typeof window!=='undefined'&&window.Capacitor)) return;
+  try{ const P=(window.Capacitor&&window.Capacitor.Plugins)||{};
+    const FS=P.ForegroundService;
+    if(FS&&FS.startForegroundService)
+      FS.startForegroundService({id:7,title:'TRQ يعمل',
+        body:'متصل بالمنصة ويراقب الصفقات باستمرار',smallIcon:'ic_launcher',silent:true}).catch(()=>{});
+    const BO=P.BatteryOptimization;
+    if(BO&&BO.isBatteryOptimizationEnabled&&!(localStorage.getItem('trq_bo_asked')))
+      BO.isBatteryOptimizationEnabled().then(r=>{
+        if(r&&r.enabled&&BO.requestIgnoreBatteryOptimization){
+          localStorage.setItem('trq_bo_asked','1');
+          BO.requestIgnoreBatteryOptimization().catch(()=>{}); } }).catch(()=>{});
+  }catch(e){} }
 function clearNativeOngoing(){ const LN=lnPlugin(); if(LN) LN.cancel({notifications:[{id:7}]}).catch(()=>{}); }
 function notify(txt,kind){ if(S.sound){
     // نغمة مميزة لكل حدث: ربح = نغمتان صاعدتان · تحذير = تنبيه قوي · عادي = النغمة المختارة
@@ -268,7 +283,11 @@ async function placeOrderSmart(body){
       body={...body,marginMode:pos.crossMode?'CROSS':'ISOLATED'}; }
   }catch(_){}
   try{ return await kcPrivate('POST','/api/v1/orders',body); }
-  catch(e){ const m=e.message||String(e);
+  catch(e){ let m=e.message||String(e);
+    // رفض postOnly (السعر قاطع الدفتر): أعد المحاولة كأمر حدّي عادي — مستوى بعيد عابر لا يُفوَّت
+    if(body.postOnly){ const b3={...body}; delete b3.postOnly;
+      try{ return await kcPrivate('POST','/api/v1/orders',b3); }
+      catch(e2){ m=e2.message||String(e2); body=b3; if(!/margin|هامش/i.test(m)) throw e2; } }
     if(!/margin|هامش/i.test(m)) throw e;
     if(!mmTried[body.symbol]){ mmTried[body.symbol]=1;
       try{ await kcPrivate('POST','/api/v1/marginMode/change',{symbol:body.symbol,marginMode:'ISOLATED'}); }catch(_){}
@@ -283,6 +302,7 @@ function exPlaceLimit(intent){
   return placeOrderSmart({clientOid:intent.clientOid,symbol:intent.symbol,
     side:intent.side,type:'limit',price:String(intent.price),size:intent.qty,
     leverage:String(intent.leverage),timeInForce:'GTC',reduceOnly:!!intent.reduceOnly,
+    postOnly:!intent.reduceOnly, // مستويات الشبكة صانعة سوق: رسوم أقل ولا انزلاق — الجني مستثنى لئلا يُرفض
     marginMode:'ISOLATED'});
 }
 function exPlaceMarket(symbol,side,qty){
@@ -303,6 +323,22 @@ async function exPing(){
   const a=await kcPrivate('GET','/api/v1/account-overview?currency=USDT');
   return a?Number(a.accountEquity??a.availableBalance??0):null;
 }
+/* حارس خادمي: أمر إيقاف طوارئ يعيش على خوادم KuCoin نفسها — يقفل المركز قبل التصفية
+   حتى لو انقطع التطبيق أو نام الجوال (آخر خط دفاع عند غياب البوت) */
+async function exPlaceStopGuard(){ if(S.config.mode!=='live'||!S.keys||!S.position) return;
+  const liq=S.exLiqPrice||S.position.liquidation||S.liqPrice||0; if(!liq) return;
+  const sh=S.position.side==='short';
+  const gp=sh?liq*1.015:liq*0.985;
+  if(S._guardPx&&Math.abs(gp-S._guardPx)/S._guardPx<0.005&&Date.now()-(S._guardAt||0)<60000) return;
+  try{ await kcPrivate('POST','/api/v1/orders',{clientOid:'grd_'+Date.now().toString(36),
+      symbol:S.config.symbol,type:'market',side:sh?'buy':'sell',
+      stop:sh?'up':'down',stopPrice:String(gp),stopPriceType:'MP',
+      reduceOnly:true,closeOrder:true});
+    S._guardPx=gp; S._guardAt=Date.now();
+    if(!S._guardLogged){ S._guardLogged=true;
+      pushLog('server','حارس خادمي مفعّل — إيقاف طوارئ على المنصة عند '+fmtPx(gp)+' (يعمل حتى لو نام التطبيق)'); }
+  }catch(e){ if(!S._guardErrAt||Date.now()-S._guardErrAt>300000){ S._guardErrAt=Date.now();
+      pushLog('error','الحارس الخادمي: '+(e.message||e)); } } }
 
 /* ---------- تدفق الشريط والحيتان — من صفقات المنصة المنفذة لحظيًا ---------- */
 function tapeFlow(){ const t=S.tape; if(!t||t.length<6) return {bias:0,whale:0,whaleVol:0};
@@ -339,6 +375,9 @@ function bookQuality(){ const b=S.orderBook,p=S.lastPrice||0;
   const wall=short?b.bids:b.asks, depth=volSum(wall.slice(0,8));
   const need=contractsForLevel(p)*2.5;
   return !(depth>0&&need>0&&depth<need); }
+// وسيط أحجام مستويات الدفتر — مرجع لكشف الجدران الضخمة وتطبيع تدفق الأوامر
+function medLevelSz(ob){ const s=[...ob.bids.slice(0,10),...ob.asks.slice(0,10)].map(x=>x.size).sort((a,b)=>a-b);
+  return s.length?s[Math.floor(s.length/2)]:0; }
 function retStdev(){ const t=S.priceTrail; if(t.length<4) return 0;
   const r=[]; for(let i=1;i<t.length;i++) if(t[i-1]>0) r.push((t[i]-t[i-1])/t[i-1]*100);
   if(r.length<3) return 0; const m=r.reduce((a,b)=>a+b,0)/r.length;
@@ -584,7 +623,9 @@ function learnTrade(side,pnl){ if(!Number.isFinite(pnl)) return;
   r.n++; r.pnl=Math.round((r.pnl+pnl)*10000)/10000; r.at=Date.now(); // at: مرجع النسيان التدريجي
   if(pnl>0){ r.w++; r.streak=(r.streak>0?r.streak:0)+1; }
   else if(pnl<0){ r.l++; r.streak=(r.streak<0?r.streak:0)-1;
-    r.maxLoseStreak=Math.max(r.maxLoseStreak||0,-r.streak); }
+    r.maxLoseStreak=Math.max(r.maxLoseStreak||0,-r.streak);
+    // تهدئة ما بعد الخسارة: حظر دخول جديد بنفس الاتجاه خمس دقائق — لا مطاردة انفعالية
+    S._lossAt={at:Date.now(),side:side||S.config.direction}; }
   // لقطة ظروف الدخول — الذاكرة تتعلم «في أي ظرف أنجح» لا «أي زوج» فقط
   const cx=S._entryCtx||{};
   const ck=(cx.rg||'؟')+'|'+(cx.origin||'؟');
@@ -849,8 +890,24 @@ function huntAligned(){ const conf=S.confluence||{momentum:0,idle:false,score:0}
     const rg=S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي';
     const ro=mp.regimes&&mp.regimes[rg];
     if(ro&&ro.n>=8&&ro.pnl<0&&smWR(ro)<0.32) return false; }
+  // تأكيد النشاط: شريط صفقات أضعف من نصف وسيطه = صيد في سوق ميت — ارفض
+  const am=S._actMed||0; if(am>=8&&S.tape.length<am*0.5) return false;
+  // فلتر قرب الجدار + تطبيع OFI على وسيط أحجام مستويات الدفتر
+  const ob=S.orderBook,lp=S.lastPrice||0;
+  if(ob&&ob.bids.length&&ob.asks.length&&lp>0){ const medL=medLevelSz(ob);
+    if(medL>0){
+      // جدار ضخم (5× الوسيط) على مسافة <0.15% بوجه اتجاه الصيد = مصيدة — ارفض
+      if(!short){ for(const a of ob.asks){ if(a.price>lp&&(a.price-lp)/lp*100<0.15&&a.size>medL*5) return false; } }
+      else { for(const b of ob.bids){ if(b.price<lp&&(lp-b.price)/lp*100<0.15&&b.size>medL*5) return false; } }
+      // بوابة تدفق الأوامر (OFI): ضغط أوامر حدّية قوي عكس اتجاه الصيد = لا تدخل
+      const nofi=(S._ofi||0)/(medL*20);
+      if(short&&nofi>0.6) return false; if(!short&&nofi<-0.6) return false; } }
+  // قائد BTC: نبضة قوية في المؤشر عكس اتجاه الصيد على العملات التابعة = ارفض
+  if(S._btcImp!=null&&Math.abs(S._btcImp)>=0.10){
+    if(short&&S._btcImp>0) return false; if(!short&&S._btcImp<0) return false; }
   return true; }
-function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
+function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct,
+    (profOf()&&profOf().spread?profOf().spread*2.5:0)); // أرضية سبريد: لا صيد بعائد يأكله الفرق السعري
   const mag=Math.abs(S.biasScore);
   const stalled=S.lastWorkAt&&Date.now()-S.lastWorkAt>90000;
   let scaled=base*(S.regime?S.regime.huntMult:1)*memHuntMult()*profStepMult();
@@ -859,6 +916,9 @@ function effectiveHuntPct(){ const base=Math.max(0.18,S.config.huntPct);
   if(rg){ const sh=S.config.direction==='short';
     const aligned=(sh&&rg.trend==='down')||(!sh&&rg.trend==='up');
     if(aligned&&!rg.shock) scaled*=0.8; }
+  // قائد BTC يساند اتجاه الصيد على العملات التابعة — سهّل الاقتناص
+  if(S._btcImp!=null&&Math.abs(S._btcImp)>=0.10){ const sh2=S.config.direction==='short';
+    if((sh2&&S._btcImp<0)||(!sh2&&S._btcImp>0)) scaled*=0.85; }
   // إعادة دخول ذكية: ربح حديث على نفس الاتجاه والموجة مستمرة — اركب الموجة التالية أسرع
   if(S._lastWinClose&&Date.now()-S._lastWinClose.at<180000&&S._lastWinClose.side===S.config.direction) scaled*=0.7;
   if(S.position&&S.position.side!==S.config.direction) return Math.max(0.08,scaled*0.4);
@@ -953,6 +1013,8 @@ function packHunt(p){ return {side:S.config.direction==='short'?'sell':'buy',qty
 function huntTrigger(p){ if(S.status!=='running'||!p) return null;
   if(!warmedUp()) return null;
   if(studying()) return null; // العملة قيد الدراسة — لا دخول قبل اكتمال بصمتها
+  // تهدئة ما بعد الخسارة: إغلاق خاسر حديث بنفس الاتجاه = لا دخول جديد لخمس دقائق
+  if(!S.position&&S._lossAt&&S._lossAt.side===S.config.direction&&Date.now()-S._lossAt.at<300000) return null;
   const flipping=!!(S.position&&S.config.direction!==S.position.side);
   if(addsBlocked()&&!flipping) return null;
   if(flipping){ if(S.lastHuntAt&&Date.now()-S.lastHuntAt<120000) return null;
@@ -974,6 +1036,16 @@ function huntTrigger(p){ if(S.status!=='running'||!p) return null;
     const cover=(S.position.side==='short'&&pk.side==='buy')||
       (S.position.side==='long'&&pk.side==='sell');
     return cover?null:pk; }
+  // محفّز انحراف السعر عن المارك: ابتعاد ≥0.15% باتجاه يجعل العودة نحو المارك مع اتجاه البوت = صيد ارتداد
+  const mk=S.markPrice||0;
+  if(mk>0){ const dev=(p-mk)/mk;
+    if(Math.abs(dev)>=0.0015&&((dev>0&&S.config.direction==='short')||(dev<0&&S.config.direction==='long')))
+      return packHunt(p); }
+  // محفّز صيد السلاحف: اختراق قمة/قاع نافذة المسار ثم فشل سريع (عودة خلال 10 ثوانٍ) = فخ سيولة باتجاه البوت
+  if(S._brk&&Date.now()-S._brk.at<10000){
+    const soup=(S._brk.side==='up'&&p<S._brk.level&&S.config.direction==='short')||
+      (S._brk.side==='down'&&p>S._brk.level&&S.config.direction==='long');
+    if(soup){ S._brk=null; return packHunt(p); } }
   const pct=(p-S.huntAnchor)/S.huntAnchor*100, need=effectiveHuntPct();
   const hit=S.config.direction==='short'?pct<=-need:pct>=need;
   return hit?packHunt(p):null; }
@@ -1178,11 +1250,35 @@ function onStreamTick(d){
       S.priceTrail=[...S.priceTrail,d.price].slice(-120);
       S.emaFast=nextEma(S.emaFast,d.price,2/10);
       S.emaSlow=nextEma(S.emaSlow,d.price,2/22);
-      S._lastTrailAt=now; }
+      S._lastTrailAt=now;
+      // قمة/قاع نافذة المسار — تسجيل لحظة الاختراق لمحفّز صيد السلاحف (الاختراق الكاذب)
+      const tt=S.priceTrail;
+      if(tt.length>=20){ let hi=-Infinity,lo=Infinity;
+        for(let i=0;i<tt.length-1;i++){ if(tt[i]>hi)hi=tt[i]; if(tt[i]<lo)lo=tt[i]; }
+        if(hi>-Infinity&&d.price>hi) S._brk={side:'up',at:now,level:hi};
+        else if(lo<Infinity&&d.price<lo) S._brk={side:'down',at:now,level:lo}; } }
+    // عينة نشاط الشريط كل دقيقة — وسيطها مرجع «السوق الميت» في بوابة الصيد
+    if(!S._actAt||now-S._actAt>60000){ S._actAt=now;
+      S._actHist=[...(S._actHist||[]),S.tape.length].slice(-30);
+      const h=[...S._actHist].sort((a,b)=>a-b); S._actMed=h[Math.floor(h.length/2)]||0; }
     // تنفيذ فوري لجني الربح مع كل نبضة سعر — لا انتظار لدورة المحرك
     if(S.status==='running'){ try{ harvestRipe(d.price); }catch(e){} }
   }
-  if(d.book) S.orderBook=d.book;
+  if(d.book){
+    // تدفق الأوامر (OFI): ميزان ضغط أفضل عرض/طلب بين اللقطات — راكم 20 عينة أخيرة
+    const b0=d.book.bids&&d.book.bids[0], a0=d.book.asks&&d.book.asks[0];
+    const pb=S._prevBook;
+    if(pb&&pb.b&&pb.a&&b0&&a0){ let ofi=0;
+      if(b0.price>pb.b.price) ofi+=b0.size;
+      else if(b0.price<pb.b.price) ofi-=pb.b.size;
+      else ofi+=b0.size-pb.b.size;
+      if(a0.price<pb.a.price) ofi+=a0.size;
+      else if(a0.price>pb.a.price) ofi-=pb.a.size;
+      else ofi-=a0.size-pb.a.size;
+      S._ofiWin=[...(S._ofiWin||[]),ofi].slice(-20);
+      S._ofi=S._ofiWin.reduce((x,y)=>x+y,0); }
+    S._prevBook={b:b0?{price:b0.price,size:b0.size}:null,a:a0?{price:a0.price,size:a0.size}:null};
+    S.orderBook=d.book; }
   if(d.trade&&d.trade.price>0){
     S.lastPrice=d.trade.price; S.lastTickAt=now;
     S.tape=[d.trade,...S.tape].slice(0,32);
@@ -1216,6 +1312,12 @@ async function loadMarket(full){
     if(ob.bids.length||ob.asks.length) m.orderBook=ob;
     if(tp.length&&tapeStale) m.tape=tp;
   }
+  // قائد BTC: نبضة المؤشر توجّه صيد العملات التابعة — قراءة REST خفيفة كل دورة كاملة
+  if(full&&c!=='XBTUSDTM'){ try{ const bt=await fetchTicker('XBTUSDTM'); const bp=+bt.price||0;
+    if(bp>0){ const pv=S._btcPrev;
+      if(pv&&pv.px>0){ const dtMin=Math.max(0.05,(Date.now()-pv.at)/60000);
+        S._btcImp=Math.round(((bp-pv.px)/pv.px*100)/dtMin*10000)/10000; } // تغير % لكل دقيقة
+      S._btcPrev={px:bp,at:Date.now()}; } }catch(e){} }
   return m;
 }
 
@@ -1228,8 +1330,9 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
       else { S.position.size=pos.size; S.position.entry=pos.entry;
         S.position.unrealized=pos.unrealized; S.position.side=pos.side;
         if(pos.liquidation) S.position.liquidation=pos.liquidation; } }
-    else if(S.position&&Date.now()>S.ignoreExchangeUntil){ S.position=null; }
+    else if(S.position&&Date.now()>S.ignoreExchangeUntil){ S.position=null; S._guardPx=0; }
     if(pos&&pos.liquidation) S.exLiqPrice=pos.liquidation;
+    if(S.position) exPlaceStopGuard(); // إيقاف طوارئ على المنصة يحمي المركز حتى لو نام التطبيق
   }catch(e){ pushLog('error','قراءة المركز: '+(e.message||e)); }
   try{
     const exs=await exOrders(sym);
@@ -1407,6 +1510,10 @@ export function saveCfg(v){
     S.orderBook={bids:[],asks:[]}; S.biasScore=0; S.biasReasons=[];
     S.regime=null; S.confluence=null; S.heartbeat=0;
     S.liqPrice=null; S.exLiqPrice=null; S.huntAnchor=null; S.gridAnchor=null;
+    // تصفير حالة الإشارات الجديدة — كل عملة تُقرأ من صفر بمعطياتها وحدها
+    S._brk=null; S._ofi=0; S._ofiWin=[]; S._prevBook=null;
+    S._btcImp=null; S._btcPrev=null; S._actHist=[]; S._actMed=0;
+    S._lossAt=null; S._guardPx=0; S._guardLogged=false;
     setStreamSymbol(sym);
     // بصمة العملة الجديدة: معروفة وحديثة = إحماء قصير · جديدة = دراسة كاملة قبل التداول
     const pf=S.memory&&S.memory.profiles&&S.memory.profiles[sym];
@@ -1451,6 +1558,8 @@ export function initEngine(){
   refreshBal(); setInterval(refreshBal,20000);
   // البقاء الصوتي الصامت: يعمل دائمًا على الجوال حتى لا يُخنق المحرك بإطفاء الشاشة
   startSilentKeepAlive();
+  // خدمة أمامية + استثناء البطارية — بقاء حقيقي في الخلفية لا يعتمد على الحيل الصوتية وحدها
+  startForegroundSvc();
   // عند العودة من الخلفية: دورة محرك فورية لتعويض أي فترة خنق + إعادة فحص الأرباح الناضجة
   if(typeof document!=='undefined') document.addEventListener('visibilitychange',()=>{
     if(!document.hidden){ botTick().catch(()=>{});
