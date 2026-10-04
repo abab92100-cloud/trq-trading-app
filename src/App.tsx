@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   S, subscribe, initEngine, startBot, pauseBot, stopBot, newCycle,
   saveKeys, clearKeys, saveCfg, equity, desk, pulseAge, fmtPx, fmtUsd, fmtTime,
-  listContracts, effLevels, scanRadar,
+  listContracts, effLevels, scanRadar, detectRemoteServer,
 } from './engine';
 import { streamState } from './ws';
 import Chart from './Chart';
@@ -11,7 +11,8 @@ import Chart from './Chart';
 function useEngine() {
   const [, setN] = useState(0);
   useEffect(() => {
-    initEngine();
+    // جسّ سيرفر Termux أولًا: إن وُجد يعمل هو بالمحرك ونصبح واجهة — بلا جسّ لا يتغير شيء
+    (async () => { await detectRemoteServer().catch(() => false); initEngine(); })();
     return subscribe(() => setN(n => n + 1));
   }, []);
 }
@@ -459,6 +460,9 @@ export default function App() {
         <span className={'pill ' + (streamState.connected ? 'on' : 'dn-pill')} title="صحة قناة السعر اللحظية">
           <i></i>{streamState.connected ? 'متصل' : 'مقطوع'} · {pulseAge()}
         </span>
+        {window.__TRQ_REMOTE && (
+          <span className="pill on" title="المحرك يعمل في سيرفر Termux على هذا الجوال — بلا نوم ولا قتل خلفية">سيرفر</span>
+        )}
         <span className={'pill ' + (S.config.mode === 'live' ? 'live' : '')}>{S.config.mode === 'live' ? 'LIVE' : 'ورقي'}</span>
         <span className={'pill' + (S.status === 'running' ? ' on' : S.status === 'paused' ? ' warn' : '')}>
           <i></i><em style={{ fontStyle: 'normal' }}>

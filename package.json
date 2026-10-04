@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:server": "esbuild src/server-entry.ts --bundle --platform=node --format=esm --target=node18 --outfile=server-dist/trq-server.mjs"
   },
   "dependencies": {
     "@capawesome-team/capacitor-android-battery-optimization": "^8.0.1",
