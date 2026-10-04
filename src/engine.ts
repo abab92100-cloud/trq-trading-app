@@ -10,7 +10,7 @@ import { startStream, setStreamSymbol, streamState } from './ws';
 
 const TICK_MS = 1000; // القرارات كل ثانية على أسعار لحظية من القناة
 const MIN_NET_USD = 0.05, MAX_HUNT_OPEN = 3, HUNT_COOLDOWN = 15000,
-      ADD_COOLDOWN = 20000, SCOUT_MS = 240000, MIN_HUNT_GAP = 0.12;
+      ADD_COOLDOWN = 20000, SCOUT_MS = 90000, MIN_HUNT_GAP = 0.12;
 
 /* ---------- أدوات ---------- */
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
@@ -147,7 +147,7 @@ function saveAll(){ try{
   const rt={grid:S.grid,position:S.position,journal:S.journal,realizedPnl:S.realizedPnl,
     feesPaid:S.feesPaid,cycleHarvested:S.cycleHarvested||0,priceTrail:S.priceTrail,cvd:S.cvd,huntCount:S.huntCount,
     lastPrice:S.lastPrice,markPrice:S.markPrice,activeCycle:S.activeCycle,status:S.status,
-    history:S.history,logs:S.logs};
+    history:S.history,logs:S.logs,savedAt:Date.now()};
   localStorage.setItem('trq:rt',JSON.stringify(rt));
   localStorage.setItem('trq:mem',JSON.stringify(S.memory||{pairs:{},cycles:0,totalPnl:0}));
 }catch(e){} }
@@ -161,12 +161,17 @@ function loadAll(){ try{
     realizedPnl:rt.realizedPnl||0,feesPaid:rt.feesPaid||0,cycleHarvested:rt.cycleHarvested||0,priceTrail:rt.priceTrail||[],
     cvd:rt.cvd||0,huntCount:rt.huntCount||0,lastPrice:rt.lastPrice??null,
     markPrice:rt.markPrice??null,activeCycle:rt.activeCycle||null,status:rt.status||'idle',
-    history:rt.history||[],logs:rt.logs||[]}); }
-  // لا استئناف تلقائي أبدًا: البوت لا يعمل بعد فتح التطبيق إلا بضغطة «تشغيل» من المالك.
-  // جلسة كانت تعمل تُستعاد «متوقفة مؤقتًا» — يبقى الجني والحارس يحميان أي مركز مفتوح،
-  // لكن لا صفقة جديدة ولا صيد حتى يقرر المالك
-  if(S.status==='running'){ S.status='paused';
-    pushLog('info','استُعيدت الجلسة متوقفة مؤقتًا — اضغط «تشغيل» للبدء'); }
+    history:rt.history||[],logs:rt.logs||[]});
+    S._savedAt=rt.savedAt||0; }
+  // قتل أندرويد للتطبيق في الخلفية ≠ خروج المالك: جلسة كانت تعمل وقُتلت حديثًا
+  // (أقل من 30 دقيقة) تُستأنف تلقائيًا من حيث توقفت — وإلا بقيت القاعدة:
+  // لا تشغيل بعد فتح التطبيق إلا بضغطة «تشغيل» من المالك (تثبيت جديد / جلسة قديمة)
+  if(S.status==='running'){
+    if(S._savedAt&&Date.now()-S._savedAt<30*60*1000){
+      pushLog('server','⚡ أوقف النظام التطبيق لحظيًا — استُؤنف الصيد تلقائيًا من حيث توقف');
+      nativeNotify('TRQ عاد للعمل ✓','أوقف النظام التطبيق في الخلفية — استُؤنف الصيد تلقائيًا',true);
+    } else { S.status='paused';
+      pushLog('info','استُعيدت الجلسة متوقفة مؤقتًا — اضغط «تشغيل» للبدء'); } }
   // بصمات العملات (دراسة 60 ثانية) تُحفظ — أما سجل التعلم فأُلغي نهائيًا بطلب المالك
   const mem=JSON.parse(localStorage.getItem('trq:mem')||'null');
   S.memory={v:3,pairs:{},cycles:0,totalPnl:0,profiles:(mem&&mem.profiles)||{}};
@@ -934,7 +939,10 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
       const preempt=reversal&&net>=lock&&net<tp.peakNet;
       // هروب طارئ فقط: مركز عالق عكسيًا عميقًا يُقبل فيه خروج أصغر بدل كارثة
       const escape=stuck&&net>=0.10;
-      if(net<=stop||preempt||escape) fillLevel(tp.id,p,true);
+      // أرضية صارمة: لا جني متتبع إلا وصافيه موجب — قفزة سعرية بين نبضتين (خنق أندرويد
+      // لمؤقتات الخلفية) كانت تُطلق الحد والصافي سالب فتبيع بخسارة وتسميها «جني»
+      if((net<=stop&&net>=0.02)||preempt||escape) fillLevel(tp.id,p,true);
+      else if(net<0.02) tp.peakNet=null; // تبخّر الربح قبل الصيد — فكّ التسليح وعُد لجني المستوى الثابت
       continue; }
 
     if(net<minNet) continue;
@@ -974,9 +982,11 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
         // قفل متدرج للمركز كله أيضًا: القمة الكبيرة ترفع الأرضية
         const lockAll=S._posPeakNet>=0.50?0.42:S._posPeakNet>=0.30?0.25:0.15;
         const stopAll=Math.max(lockAll,S._posPeakNet-0.08);
-        if(netAll<=stopAll){ S._posPeakNet=null; S._spikeDone=false;
+        if(netAll<=stopAll&&netAll>=0.05){ S._posPeakNet=null; S._spikeDone=false;
           pushLog('server','⚡ صيد انزلاق ✓ — تراجع الصافي من القمة، جني المركز كاملًا');
-          flattenAt(p,'صيد انزلاق'); return; } } } }
+          flattenAt(p,'صيد انزلاق'); return; }
+        // تبخّر الربح بين نبضتين (خلفية مخنوقة): فكّ التسليح — لا إغلاق جماعي بخسارة
+        if(netAll<0.02){ S._posPeakNet=null; S._spikeDone=false; } } } }
   else { S._posPeakNet=null; S._spikeDone=false; S._posNetPrev=null; }
 
   // ——— درع الانزلاق العكسي ———
@@ -1573,6 +1583,52 @@ async function liveFlattenIfNeeded(prevSide){ if(S.config.mode!=='live'||!S.keys
     if(pos){ await exCancelAll(S.config.symbol); await exClose(S.config.symbol,pos.side);
       pushLog('server','أُغلق المركز الحقيقي على المنصة'); } }catch(e){} }
 
+// نبضة حياة: البوت يعمل لكنه صامت — كل 4 دقائق بلا أي سطر يكتب لماذا لا صيد الآن،
+// فلا يبدو متجمدًا وهو يترقب (الصمت الطويل كان يُقرأ «تأخير غير مفهوم»)
+function heartbeatBeat(p){ if(S.status!=='running'||!p) return;
+  const now=Date.now(); if(S._lastBeatAt&&now-S._lastBeatAt<240000) return;
+  if(S.logs.length&&now-S.logs[0].at<240000) return; // السجل حي أصلًا — لا ضجيج
+  S._lastBeatAt=now;
+  const mom=S.confluence?S.confluence.momentum:0, fl=tapeFlow();
+  let why;
+  if(studying()) why='أُنهي دراسة البصمة ('+Math.max(1,Math.ceil((S.studyUntil-now)/1000))+'ث متبقية)';
+  else if(S.position){ const pos=S.position, sgn=pos.side==='short'?1:-1;
+    const net=sgn*(pos.entry-p)*(S.multiplier||1)*pos.size-(pos.size*(S.multiplier||1)*(pos.entry*S.makerFee+p*S.takerFee));
+    why='أدير مركزًا مفتوحًا — الصافي '+fmtUsd(net)+' والجني المتتبع يتربص'; }
+  else { const v=dangerVeto(p);
+    if(v) why='فيتو خطر: '+v;
+    else { const sig=huntSignals(p);
+      why=sig.length?('إشارات تتراكم: '+sig.slice(0,2).join(' · '))
+        :'لا إشارة دخول بعد — أنتظر التقاء الزخم والتدفق'; } }
+  pushLog('info','💓 أراقب '+(S.config.displaySymbol||S.config.symbol)+' @ '+fmtPx(p)+
+    ' — زخم '+(mom>=0?'+':'')+mom.toFixed(2)+' · تدفق '+(fl.bias>=0?'+':'')+fl.bias.toFixed(2)+' — '+why); }
+
+// خدش الصفقات الميتة: صفقة صيد عاشت 15 دقيقة عند التعادل (±$0.06) بلا زخم يدعمها
+// تحجز خانة من خانات الصيد الثلاث وتجمّد رأس المال — تُغلق عند التعادل وتُحرَّر
+function scratchDeadHunts(p){ if(S.status!=='running'||!p) return;
+  const now=Date.now();
+  for(const g of S.grid.filter(x=>x.origin==='hunt'&&!x.reduceOnly&&x.status==='filled')){
+    if(now-(g.filledAt||0)<900000) continue;
+    const entry=g.filledPrice||g.price, sgn=g.side==='sell'?1:-1, qty=g.qty;
+    const net=sgn*(entry-p)*(S.multiplier||1)*qty
+      -feeFor(qty*(S.multiplier||1)*entry,true)-feeFor(qty*(S.multiplier||1)*p,true);
+    if(net<-0.06||net>0.08) continue; // الخاسر يُدار بوقفه والرابح بتتبعه — الخدش للميت فقط
+    const mom=S.confluence?S.confluence.momentum:0;
+    if((g.side==='buy'&&mom>0.06)||(g.side==='sell'&&mom<-0.06)) continue; // زخم حي — امنحها وقتًا
+    // حارس التطابق: لا خدش إلا ومركز مفتوح بنفس جهة الصفقة — وإلا فتح applyDelta مركزًا عكسيًا جديدًا
+    const pos=S.position, lotSide=g.side==='sell'?'short':'long';
+    if(!pos||pos.side!==lotSide||pos.size<qty) continue;
+    const d=applyDelta(g.side==='sell'?'buy':'sell',qty,p);
+    if(d.closedQty>0){ const fee=feeFor(d.closedQty*(S.multiplier||1)*p,true); S.feesPaid+=fee;
+      noteClose(d.closedQty,p,fee,'خدش',net,g.lotId);
+      S.huntOpen=Math.max(0,(S.huntOpen||0)-1); g.status='cancelled';
+      if(S.config.mode==='live'&&S.keys)
+        exCloseQty(S.config.symbol,g.side==='sell'?'short':'long',d.closedQty)
+          .catch(e=>pushLog('error','خدش حقيقي فشل: '+(e.message||e)));
+      pushLog('info','خدش تعادل — صفقة ميتة الحراك '+Math.round((now-(g.filledAt||now))/60000)+
+        ' دقيقة بلا زخم، حُرّرت خانة صيد');
+      S.lastWorkAt=now; } } }
+
 async function botTick(){
   const running=S.status==='running', paused=S.status==='paused';
   if(!running&&!paused&&S.status!=='idle') return;
@@ -1606,13 +1662,14 @@ async function botTick(){
             else pushLog('error','فشل صيد السوق: '+m); } }
         else done=true;
         if(done) maybeHunt(price); }
-      ensureGrid(); harvestRipe(price);
+      ensureGrid(); harvestRipe(price); scratchDeadHunts(price);
     }
     pruneGhosts(); markUnrealized(price||m.price);
     // مزامنة المنصة كل 5 ثوانٍ تكفي — كل ثانية كانت تستنزف حصة الطلبات والبطارية
     if(!S._liveSyncAt||Date.now()-S._liveSyncAt>5000){ S._liveSyncAt=Date.now();
       try{ await liveSync(); }catch(e){} }
     try{ maybeReport(); }catch(e){}
+    try{ heartbeatBeat(price||m.price); }catch(e){}
     emit(); saveAll();
   }catch(e){ S.lastTickAt=Date.now();
     if(!/abort|timeout|429|50[0-4]|fetch/i.test(e.message||'')) pushLog('error',e.message||String(e)); }
