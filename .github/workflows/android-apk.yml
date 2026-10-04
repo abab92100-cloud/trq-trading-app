@@ -29,7 +29,9 @@ jobs:
           npm run build
 
       - name: Bundle Termux server (single self-contained file)
-        run: npx --yes esbuild src/server-entry.ts --bundle --platform=node --format=esm --target=node18 --outfile=server-dist/trq-server.mjs
+        run: |
+          npx --yes esbuild src/server-entry.ts --bundle --platform=node --format=esm --target=node18 --outfile=server-dist/trq-server.mjs
+          cp trq-setup.sh server-dist/trq-setup.sh
 
       - name: Wrap with Capacitor Android shell
         run: |
@@ -202,12 +204,12 @@ jobs:
             حمّل ملف **app-debug.apk** على جوالك وثبّته مباشرة.
             داخل التطبيق: الإعدادات ← أدخل مفاتيح KuCoin (تداول فقط) ← تشغيل.
 
-            **سيرفر الجوال (Termux) — البوت لا ينام أبدًا:**
-            1. ثبّت Termux من F-Droid ثم نفّذ:
-            `pkg update -y && pkg install -y nodejs-lts && mkdir -p ~/trq && cd ~/trq`
-            2. حمّل السيرفر: `curl -L -o trq-server.mjs https://github.com/abab92100-cloud/trq-trading-app/releases/download/apk-v${{ github.run_number }}/trq-server.mjs`
-            3. شغّله: `termux-wake-lock && node trq-server.mjs`
-            4. افتح تطبيق TRQ — سيكتشف السيرفر تلقائيًا وتظهر شارة «سيرفر».
+            **سيرفر الجوال (Termux) — أمر واحد فقط ويعمل بلا نوم:**
+            ```
+            curl -sL https://github.com/abab92100-cloud/trq-trading-app/releases/latest/download/trq-setup.sh | bash
+            ```
+            ثم افتح تطبيق TRQ — سيكتشف السيرفر تلقائيًا وتظهر شارة «سيرفر».
           files: |
             android/app/build/outputs/apk/debug/app-debug.apk
             server-dist/trq-server.mjs
+            server-dist/trq-setup.sh
