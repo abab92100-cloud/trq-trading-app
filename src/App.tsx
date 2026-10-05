@@ -319,8 +319,12 @@ function JournalScreen() {
         </h3>
         <div style={{ maxHeight: 320, overflowY: 'auto', WebkitOverflowScrolling: 'touch' }}>
           {rows.length ? rows.map(j => {
+            // الصفقة المفتوحة تعرض صافيًا مطابقًا للمحاسبة النهائية: تُخصم رسوم الخروج
+            // (taker) المقدّرة أيضًا — العرض القديم كان متفائلًا بمقدار رسوم الخروج
+            const exitFeeEst = j.status === 'open' && S.lastPrice ?
+              j.qty * (S.multiplier || 1) * S.lastPrice * (S.takerFee || 0.0006) : 0;
             const pnl = j.status === 'closed' ? j.pnl : (S.lastPrice ?
-              ((j.side === 'short' ? 1 : -1) * (j.entry - S.lastPrice) * (S.multiplier || 1) * j.qty - j.fees) : 0);
+              ((j.side === 'short' ? 1 : -1) * (j.entry - S.lastPrice) * (S.multiplier || 1) * j.qty - j.fees - exitFeeEst) : 0);
             return (
               <div className="log" key={j.id}>
                 <span className={(pnl > 0 ? 'up' : pnl < 0 ? 'dn' : 'muted') + ' mono'}>{fmtUsd(pnl)}</span>

@@ -953,11 +953,12 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     const entryFee=lot?lot.fees:feeFor(tp.qty*(S.multiplier||1)*entry,false);
     const net=pnl-entryFee-exitFee;
     const stuck=!!(S.position&&adversePct(p)>=0.45);
-    // عتبات متكيفة مع حجم المستوى بالدولار — الثابت $0.15 كان يطلب من مستوى بخمسة
-    // دولارات حركة 3% فلا يُجنى أبدًا ثم يُخدش خاسرًا بالرسوم: الآن 0.4% من القيمة
-    // الاسمية بحد أدنى $0.08 (يغطي الرسوم ويربح) وأقصى $0.60 للمستويات الكبيرة
+    // عتبات الجني مربوطة بنسبة الصيد التي يضبطها المستخدم: هدف الصافي = النسبة
+    // من القيمة الاسمية بعد خصم رسوم الذهاب والعودة — 0.4% الثابتة كانت تتجاهل
+    // إعداد المستخدم فلا يُجنى ربح 0.15% أبدًا ثم تنقلب الصفقة خاسرة
     const notional=Math.max(1,tp.qty*(S.multiplier||1)*p);
-    const minNet=clamp(notional*0.004,0.08,0.60);
+    const feeRt=notional*((S.makerFee||0.0002)+(S.takerFee||0.0006));
+    const minNet=clamp(notional*Math.max(0.12,S.config.huntPct||0.15)/100-feeRt,0.05,0.60);
     const lock1=minNet, lock2=minNet*1.7, lock3=minNet*2.9;
 
     // قراءة اتجاه الرياح لصالح/ضد هذا المستوى:
@@ -978,11 +979,14 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
       const preempt=reversal&&net>=lock&&net<tp.peakNet;
       // هروب طارئ فقط: مركز عالق عكسيًا عميقًا يُقبل فيه خروج أصغر بدل كارثة
       const escape=stuck&&net>=minNet*0.66;
-      // أرضية صارمة: لا جني متتبع إلا وصافيه موجب — قفزة سعرية بين نبضتين (خنق أندرويد
+      // أرضية الرسوم: لا جني متتبع دون غطاء الرسوم — قفزة سعرية بين نبضتين (خنق أندرويد
       // لمؤقتات الخلفية) كانت تُطلق الحد والصافي سالب فتبيع بخسارة وتسميها «جني»
-      const floor=Math.max(0.02,minNet*0.13);
+      const floor=Math.max(feeRt*0.6,minNet*0.13);
       if((net<=stop&&net>=floor)||preempt||escape) fillLevel(tp.id,p,true);
-      else if(net<floor) tp.peakNet=null; // تبخّر الربح قبل الصيد — فكّ التسليح وعُد لجني المستوى الثابت
+      // فائز قوي (بلغ التسليح الكامل) تبخّر ربحه حتى التعادل: اخرج فورًا بتعادل+
+      // ولا تفكّ التسليح فيُخدش بخسارة لاحقًا — الفائز لا يتحول إلى خاسر أبدًا
+      else if(net<floor){ if(tp.peakNet>=lock2&&net>=-feeRt*0.5) fillLevel(tp.id,p,true);
+        else tp.peakNet=null; } // تتبع ضعيف تبخّر مبكرًا — فكّ التسليح وعُد لجني المستوى الثابت
       continue; }
 
     if(net<minNet) continue;
@@ -1001,10 +1005,13 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
     if(qty>0){ const sgn=pos.side==='short'?1:-1;
       const netAll=sgn*(pos.entry-p)*(S.multiplier||1)*qty
         -qty*(S.multiplier||1)*(pos.entry*S.makerFee+p*S.takerFee);
-      // عتبات المركز متكيفة مع قيمته الاسمية — لا تسليح مستحيل على مركز صغير
+      // عتبات المركز مربوطة بهدف الصيد الصافي الذي يضبطه المستخدم — السقف الثابت
+      // $2.00 كان يترك ربحًا وصل $1.90 بلا تسليح فتنقلب الصفقة خاسرة بلا حماية
       const posNotional=Math.max(1,qty*(S.multiplier||1)*p);
-      const armAll=clamp(posNotional*0.005,0.20,2.00);
-      const jumpMin=clamp(posNotional*0.003,0.15,1.20);
+      const feeRtAll=posNotional*((S.makerFee||0.0002)+(S.takerFee||0.0006));
+      const netTarget=Math.max(0.06,posNotional*Math.max(0.12,S.config.huntPct||0.15)/100-feeRtAll);
+      const armAll=clamp(netTarget*0.7,0.12,2.00);
+      const jumpMin=clamp(netTarget*0.5,0.10,1.20);
       // صائد الفتيلات: قفزة صافي مُحققة خلال 6 ثوانٍ — جني نصف المركز فورًا وتتبع الباقي
       const pn=S._posNetPrev;
       if(pn&&netAll-pn.jump>=jumpMin&&Date.now()-pn.at<=6000&&qty>=2&&!S._spikeDone
@@ -1038,11 +1045,17 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
         // قفل متدرج للمركز كله أيضًا: القمة الكبيرة ترفع الأرضية (نسب من armAll)
         const lockAll=S._posPeakNet>=armAll*2.9?armAll*2.44:S._posPeakNet>=armAll*1.7?armAll*1.42:armAll*0.75;
         const stopAll=Math.max(lockAll,S._posPeakNet-armAll*0.27);
-        if(netAll<=stopAll&&netAll>=armAll*0.25){ S._posPeakNet=null; S._spikeDone=false;
+        const beFloor=Math.max(0.04,armAll*0.2);
+        if(netAll<=stopAll&&netAll>=beFloor){ S._posPeakNet=null; S._spikeDone=false;
           pushLog('server','⚡ صيد انزلاق ✓ — تراجع الصافي من القمة، جني المركز كاملًا');
           flattenAt(p,'صيد انزلاق'); return; }
-        // تبخّر الربح بين نبضتين (خلفية مخنوقة): فكّ التسليح — لا إغلاق جماعي بخسارة
-        if(netAll<armAll*0.1){ S._posPeakNet=null; S._spikeDone=false; } } } }
+        // فائز قوي تبخّر ربحه حتى التعادل: أغلق بتعادل+ ولا تفكّ التسليح صامتًا —
+        // فكّ التسليح كان يرمي حماية ربح كبير فتنقلب الصفقة خسارة كاملة
+        if(netAll<beFloor){ const strongAll=S._posPeakNet>=armAll*1.5;
+          S._posPeakNet=null; S._spikeDone=false;
+          if(strongAll&&netAll>=-beFloor){
+            pushLog('server','تبخّر ربح قوي حتى التعادل — خروج بتعادل+ بدل انقلاب خاسر');
+            flattenAt(p,'جني تعادل'); return; } } } } }
   else { S._posPeakNet=null; S._spikeDone=false; S._posNetPrev=null; S._spikePosId=null; }
 
   // ——— درع الانزلاق العكسي ———
@@ -1659,32 +1672,39 @@ function heartbeatBeat(p){ if(S.status!=='running'||!p) return;
   pushLog('info','💓 أراقب '+(S.config.displaySymbol||S.config.symbol)+' @ '+fmtPx(p)+
     ' — زخم '+(mom>=0?'+':'')+mom.toFixed(2)+' · تدفق '+(fl.bias>=0?'+':'')+fl.bias.toFixed(2)+' — '+why); }
 
-// خدش الصفقات الميتة: صفقة صيد عاشت 15 دقيقة عند التعادل (±$0.06) بلا زخم يدعمها
-// تحجز خانة من خانات الصيد الثلاث وتجمّد رأس المال — تُغلق عند التعادل وتُحرَّر
+// خدش الصفقات الميتة: صفقة صيد عاشت 12 دقيقة عند التعادل الحقيقي بلا زخم يدعمها
+// تحجز خانة من خانات الصيد وتجمّد رأس المال — تُغلق عند التعادل فقط وتُحرَّر
 function scratchDeadHunts(p){ if(S.status!=='running'||!p) return;
   const now=Date.now();
   for(const g of S.grid.filter(x=>x.origin==='hunt'&&!x.reduceOnly&&x.status==='filled')){
-    if(now-(g.filledAt||0)<720000) continue; // عمر ≥ 12 دقيقة
+    if(now-(g.filledAt||0)<720000){ g._deadSince=null; continue; } // عمر ≥ 12 دقيقة
     const entry=g.filledPrice||g.price, sgn=g.side==='sell'?1:-1, qty=g.qty;
     const net=sgn*(entry-p)*(S.multiplier||1)*qty
       -feeFor(qty*(S.multiplier||1)*entry,true)-feeFor(qty*(S.multiplier||1)*p,true);
-    // منطقة الموت متكيفة مع حجم الصفقة: الخاسر يُدار بوقفه والرابح بتتبعه — الخدش للميت فقط
-    const dead=clamp(qty*(S.multiplier||1)*p*0.002,0.04,0.15);
-    if(net<-dead||net>dead*1.33) continue;
+    // منطقة الموت = تعادل حقيقي فقط (نحو نصف رسوم الذهاب والعودة) — النطاق الواسع
+    // القديم (±$0.15) كان يخدش بخسارة −$0.13 ويسميها «تعادل» ويقتل رابحًا +$0.20
+    const feeBuf=Math.max(0.03,qty*(S.multiplier||1)*p*((S.makerFee||0.0002)+(S.takerFee||0.0006))*0.55);
+    if(net<-feeBuf||net>feeBuf*1.5){ g._deadSince=null; continue; }
+    // صفقة يملك تتبعٌ مسلّح خروجَها — لا خدش لها أبدًا مهما دخلت منطقة الموت لحظيًا
+    const trailed=S.grid.some(x=>x.reduceOnly&&x.lotId&&x.lotId===g.lotId&&x.peakNet!=null);
+    if(trailed){ g._deadSince=null; continue; }
     const mom=S.confluence?S.confluence.momentum:0;
-    if((g.side==='buy'&&mom>0.06)||(g.side==='sell'&&mom<-0.06)) continue; // زخم حي — امنحها وقتًا
+    if((g.side==='buy'&&mom>0.06)||(g.side==='sell'&&mom<-0.06)){ g._deadSince=null; continue; } // زخم حي — امنحها وقتًا
+    // استمرارية موت 90 ثانية — نبضة عابرة واحدة داخل المنطقة لا تقتل صفقة
+    if(!g._deadSince){ g._deadSince=now; continue; }
+    if(now-g._deadSince<90000) continue;
     // حارس التطابق: لا خدش إلا ومركز مفتوح بنفس جهة الصفقة — وإلا فتح applyDelta مركزًا عكسيًا جديدًا
     const pos=S.position, lotSide=g.side==='sell'?'short':'long';
-    if(!pos||pos.side!==lotSide||pos.size<qty) continue;
+    if(!pos||pos.side!==lotSide||pos.size<qty){ g._deadSince=null; continue; }
     const d=applyDelta(g.side==='sell'?'buy':'sell',qty,p);
     if(d.closedQty>0){ const fee=feeFor(d.closedQty*(S.multiplier||1)*p,true); S.feesPaid+=fee;
       noteClose(d.closedQty,p,fee,'خدش',net,g.lotId);
-      S.huntOpen=Math.max(0,(S.huntOpen||0)-1); g.status='cancelled';
+      S.huntOpen=Math.max(0,(S.huntOpen||0)-1); g.status='cancelled'; g._deadSince=null;
       if(S.config.mode==='live'&&S.keys)
         exCloseQty(S.config.symbol,g.side==='sell'?'short':'long',d.closedQty)
           .catch(e=>pushLog('error','خدش حقيقي فشل: '+(e.message||e)));
       pushLog('info','خدش تعادل — صفقة ميتة الحراك '+Math.round((now-(g.filledAt||now))/60000)+
-        ' دقيقة بلا زخم، حُرّرت خانة صيد');
+        ' دقيقة عند التعادل بلا زخم، حُرّرت خانة صيد ('+fmtUsd(net)+')');
       S.lastWorkAt=now; } } }
 
 async function botTick(){
