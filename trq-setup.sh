@@ -3,28 +3,50 @@
 # TRQ Trading — مثبّت ومشغّل سيرفر الجوال بأمر واحد
 # الاستخدام (انسخه كاملًا في Termux):
 #   curl -sL https://github.com/abab92100-cloud/trq-trading-app/releases/latest/download/trq-setup.sh | bash
+# إن لم يوجد curl أصلًا:
+#   pkg install -y curl && curl -sL https://github.com/abab92100-cloud/trq-trading-app/releases/latest/download/trq-setup.sh | bash
 # ══════════════════════════════════════════════════════════════
-set -e
 
 echo "═══ TRQ — سيرفر الجوال ═══"
 
-# 1) Node.js — يُثبَّت تلقائيًا إن لم يوجد
-if ! command -v node >/dev/null 2>&1; then
-  echo "• تثبيت Node.js..."
-  pkg update -y
-  pkg install -y nodejs-lts
+# 0) فحص الاتصال أولًا — خطأ واضح بدل صمت محيّر
+echo "• فحص الاتصال بالإنترنت..."
+if ! curl -sI --max-time 12 https://github.com >/dev/null 2>&1; then
+  echo "✗ لا يصل الجوال إلى GitHub — تحقق من الإنترنت (أو جرّب بيانات الجوال بدل الواي فاي) ثم أعد الأمر"
+  exit 1
 fi
+echo "  الاتصال سليم ✓"
 
-# 2) تحميل أحدث نسخة من السيرفر دائمًا (رابط latest لا يتقادم)
+# 1) Node.js — يُثبَّت تلقائيًا إن لم يوجد
+#    (</dev/null يمنع pkg من التهام مجرى السكربت أثناء التنفيذ عبر الأنبوب)
+if ! command -v node >/dev/null 2>&1; then
+  echo "• تثبيت Node.js (أول مرة فقط — قد يستغرق دقيقة)..."
+  pkg update -y </dev/null
+  pkg install -y nodejs-lts </dev/null
+fi
+echo "  Node $(node -v) ✓"
+
+# 2) تحميل أحدث نسخة من السيرفر دائمًا (رابط latest لا يتقادم) + إعادة محاولة
 mkdir -p "$HOME/trq" && cd "$HOME/trq"
 echo "• تحميل أحدث سيرفر..."
-curl -L -s -o trq-server.mjs "https://github.com/abab92100-cloud/trq-trading-app/releases/latest/download/trq-server.mjs"
+if ! curl -L -s --fail --retry 3 --max-time 60 -o trq-server.mjs "https://github.com/abab92100-cloud/trq-trading-app/releases/latest/download/trq-server.mjs"; then
+  echo "✗ فشل تحميل السيرفر — أعد المحاولة بعد دقيقة"
+  exit 1
+fi
+echo "  حُمّل $(wc -c < trq-server.mjs) بايت ✓"
 
 # 3) منع نوم المعالج — السيرفر يعمل والشاشة مطفأة
 echo "• تفعيل قفل الاستيقاظ..."
 termux-wake-lock 2>/dev/null || true
 
 echo "• السيرفر يعمل الآن — افتح تطبيق TRQ وستظهر شارة «سيرفر»"
-echo "  (أبقِ هذه النافذة مفتوحة — لإيقاف السيرفر: Ctrl+C)"
+echo "  (أبقِ هذه النافذة مفتوحة — إن توقف السيرفر يعود تلقائيًا خلال 3 ثوانٍ)"
 echo "──────────────────────────────────────────────"
-exec node trq-server.mjs
+
+# 4) حارس إعادة التشغيل الذاتي: أي توقف مفاجئ = انطلاق من جديد خلال 3 ثوانٍ
+#    والحالة محفوظة في ملف المخزن فيستأنف من حيث توقف لا من الصفر
+while true; do
+  node trq-server.mjs
+  echo "⚠ السيرفر توقف — إعادة تشغيل خلال 3 ثوانٍ... (للإيقاف النهائي: Ctrl+C)"
+  sleep 3
+done
