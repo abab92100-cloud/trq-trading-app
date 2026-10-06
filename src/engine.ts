@@ -942,7 +942,12 @@ function fillLevel(id,fp,taker){ const l=S.grid.find(g=>g.id===id);
 function selectDueAdds(due,p){ if(addsBlocked()) return [];
   if(studying()) return [];
   if(toxicBlocked(S.config.direction)) return [];
-  if(S.position&&!inAddZone(p)) return [];
+  // تعبئة المستوى عند بلوغ السعر موقعه مقدسة — فيتو الزخم/الاتجاه/الحيتان
+  // القديم كان يمنع التعبئة فيقتل فكرة السلم كاملة: المتوسط لا ينكسر أبدًا
+  // والمركز ينزف نحو الكابح. الحارس الوحيد المتبقي هنا: لا اصطياد سكينٍ
+  // في لحظة طبعة عنيفة + دفتر سليم — والحماية الحقيقية: كابح الـ$16
+  // وحارس التصفية وميزانية الأحجام المتدرجة
+  if(S.position&&(lastJumpPct()>0.4||!bookQuality())) return [];
   const adds=due.filter(l=>!l.reduceOnly&&!coveringLoser(l,p))
     .sort((a,b)=>Math.abs(a.price-p)-Math.abs(b.price-p));
   const now=Date.now();
