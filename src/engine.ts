@@ -710,12 +710,19 @@ function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
     if(c.direction==='short') from=Math.max(from,Math.max(...fills)*(1+step*0.8));
     else from=Math.min(from,Math.min(...fills)*(1-step*0.8)); }
   const grid=[];
-  const G=1.5, maxDist=Math.max(step*6,0.025); // سقف امتداد السلم الكلي
   const liq=S.liqPrice||(S.position&&S.position.liquidation)||0;
+  // سلم التشبع المتسارع: يمتد من آخر منطقة دخول حتى حارس التصفية بتوزيع
+  // ناعم متسارع (i/n)^1.5 — المستويات القريبة تلتقط الارتدادات السريعة،
+  // والبعيدة أكبر حجمًا عند مناطق التشبع الحقيقية. كل المستويات مسلّحة
+  // ومواقعها معلومة — الصيغة الهندسية القديمة بسقفها كانت تنهار بعد
+  // المستوى الرابع على سعر واحد فيرفضها فلتر التقارب فيختفي السلم
+  const spanMin=step*n*0.9;
+  let span=Math.max(spanMin,0.02);
+  if(liq>0&&!wide){ const room=c.direction==='short'?liq*0.985/from-1:1-liq*1.015/from;
+    if(room>step*0.5) span=Math.max(spanMin,room); }
   for(let i=1;i<=n;i++){
-    // مسافات متسارعة (هندسية): كل منطقة أبعد من سابقتها — لا أوامر متراصة عديمة الجدوى
     // الشبكة الواسعة أيضًا لها سقف (5%) — الامتداد المفتوح كان يسلّح مستويات على بعد 30%
-    const dist=wide?Math.min(step*i,0.05):Math.min(maxDist,step*(Math.pow(G,i)-1)/(G-1));
+    const dist=wide?Math.min(step*i,0.05):span*Math.pow(i/n,1.5);
     const raw=c.direction==='short'?from*(1+dist):from*(1-dist);
     const price=roundTick(raw,tick); if(!(price>0)) continue;
     // لا تسليح في آخر 1.5% قبل التصفية (متوافق مع حد الخطر) —
@@ -1381,15 +1388,14 @@ function ensureGrid(){ if(S.status!=='running') return;
   const live=S.grid.filter(g=>!g.reduceOnly&&(g.status==='armed'||g.status==='open'));
   const drift=S.gridAnchor?Math.abs(center-S.gridAnchor)/S.gridAnchor:1;
   const empty=live.length===0, away=drift>S.config.gridStepPct/100*2.2;
-  if(S.regime&&S.regime.shock&&!empty&&S.position){
-    cancelPendingAdds(); if(S.position) syncPositionTp(); return; }
-  const mom=S.confluence?S.confluence.momentum:0;
-  const against=!!S.position&&((S.position.side==='long'&&S.regime.trend==='down'&&mom<-0.06)||
-    (S.position.side==='short'&&S.regime.trend==='up'&&mom>0.06));
-  if(against){ cancelPendingAdds(); if(S.position) syncPositionTp(); return; }
-  if(chasing&&jump>0.18) return;
+  // قاعدة المالك: السلم يبقى مسلّحًا دائمًا — لا نزع للتسليح بسبب صدمة
+  // أو اتجاه معاكس. استمرار الحركة ضد المركز يُصاد بمستويات أعمق وأكبر
+  // حجمًا تكسر المتوسط من مناطق التشبع. الحماية من الشلال: درع الانزلاق
+  // اللحظي (إلغاء لحظي ثم إعادة تسليح تلقائية هنا) + كابح الـ$16 + حارس التصفية
+  if(chasing&&jump>0.18) return; // لحظة الطبعة فقط — انتظر نبضة أو نبضتين
   if(!empty&&!away&&jump<0.12) return;
-  if(chasing){ const paused=jump>0.02&&jump<0.16;
+  // بوابة المطاردة تضبط إعادة تمركز سلم قائم فقط؛ السلم الفارغ يُبنى فورًا
+  if(chasing&&!empty){ const paused=jump>0.02&&jump<0.16;
     if(!(paused&&inAddZone(center))) return; }
   if(S.position&&!inAddZone(center)&&!empty){ if(S.position) syncPositionTp(); return; }
   cancelPendingAdds();
