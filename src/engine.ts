@@ -1603,38 +1603,9 @@ function heartbeatBeat(p){ if(S.status!=='running'||!p) return;
   pushLog('info','💓 أراقب '+(S.config.displaySymbol||S.config.symbol)+' @ '+fmtPx(p)+
     ' — زخم '+(mom>=0?'+':'')+mom.toFixed(2)+' · تدفق '+(fl.bias>=0?'+':'')+fl.bias.toFixed(2)+' — '+why); }
 
-// خدش الصفقات الميتة: صفقة صيد عاشت 12 دقيقة عند التعادل الحقيقي بلا زخم يدعمها
-// تحجز خانة من خانات الصيد وتجمّد رأس المال — تُغلق عند التعادل فقط وتُحرَّر
-function scratchDeadHunts(p){ if(S.status!=='running'||!p) return;
-  const now=Date.now();
-  for(const g of S.grid.filter(x=>x.origin==='hunt'&&!x.reduceOnly&&x.status==='filled')){
-    if(now-(g.filledAt||0)<720000){ g._deadSince=null; continue; } // عمر ≥ 12 دقيقة
-    const entry=g.filledPrice||g.price, sgn=g.side==='sell'?1:-1, qty=g.qty;
-    const net=sgn*(entry-p)*(S.multiplier||1)*qty
-      -feeFor(qty*(S.multiplier||1)*entry,true)-feeFor(qty*(S.multiplier||1)*p,true);
-    // منطقة الموت = تعادل حقيقي فقط (نحو نصف رسوم الذهاب والعودة) — النطاق الواسع
-    // القديم (±$0.15) كان يخدش بخسارة −$0.13 ويسميها «تعادل» ويقتل رابحًا +$0.20
-    const feeBuf=Math.max(0.03,qty*(S.multiplier||1)*p*((S.makerFee||0.0002)+(S.takerFee||0.0006))*0.55);
-    if(net<-feeBuf||net>feeBuf*1.5){ g._deadSince=null; continue; }
-    const mom=S.confluence?S.confluence.momentum:0;
-    if((g.side==='buy'&&mom>0.06)||(g.side==='sell'&&mom<-0.06)){ g._deadSince=null; continue; } // زخم حي — امنحها وقتًا
-    // استمرارية موت 90 ثانية — نبضة عابرة واحدة داخل المنطقة لا تقتل صفقة
-    if(!g._deadSince){ g._deadSince=now; continue; }
-    if(now-g._deadSince<90000) continue;
-    // حارس التطابق: لا خدش إلا ومركز مفتوح بنفس جهة الصفقة — وإلا فتح applyDelta مركزًا عكسيًا جديدًا
-    const pos=S.position, lotSide=g.side==='sell'?'short':'long';
-    if(!pos||pos.side!==lotSide||pos.size<qty){ g._deadSince=null; continue; }
-    const d=applyDelta(g.side==='sell'?'buy':'sell',qty,p);
-    if(d.closedQty>0){ const fee=feeFor(d.closedQty*(S.multiplier||1)*p,true); S.feesPaid+=fee;
-      noteClose(d.closedQty,p,fee,'خدش',net,g.lotId);
-      S.huntOpen=Math.max(0,(S.huntOpen||0)-1); g.status='cancelled'; g._deadSince=null;
-      if(S.config.mode==='live'&&S.keys)
-        exCloseQty(S.config.symbol,g.side==='sell'?'short':'long',d.closedQty)
-          .catch(e=>pushLog('error','خدش حقيقي فشل: '+(e.message||e)));
-      pushLog('info','خدش تعادل — صفقة ميتة الحراك '+Math.round((now-(g.filledAt||now))/60000)+
-        ' دقيقة عند التعادل بلا زخم، حُرّرت خانة صيد ('+fmtUsd(net)+')');
-      syncPositionTp(); // المركز تقلّص — أمر الجني الموحّد يُعاد حسابه على الباقي
-      S.lastWorkAt=now; } } }
+// خدش الصفقات الميتة حُذف نهائيًا بأمر المالك: لا إغلاق لأي صفقة إلا بجني
+// الربح الموحّد (صافي $0.12 للمجموع) أو كارثة $16 بانعكاس مؤكد أو خطر تصفية
+// داهم أو إيقاف يدوي — الإغلاق عند التعادل كان يقتل صفقات كان الجني سيقطفها
 
 async function botTick(){
   const running=S.status==='running', paused=S.status==='paused';
@@ -1669,7 +1640,7 @@ async function botTick(){
             else pushLog('error','فشل صيد السوق: '+m); } }
         else done=true;
         if(done) maybeHunt(price); }
-      ensureGrid(); harvestRipe(price); scratchDeadHunts(price);
+      ensureGrid(); harvestRipe(price);
     }
     pruneGhosts(); markUnrealized(price||m.price);
     // مزامنة المنصة كل 5 ثوانٍ تكفي — كل ثانية كانت تستنزف حصة الطلبات والبطارية
