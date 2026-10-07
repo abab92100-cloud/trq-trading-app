@@ -364,6 +364,7 @@ function SettingsScreen() {
   const [levels, setLevels] = useState(c.levels);
   const [step, setStep] = useState(c.gridStepPct);
   const [hunt, setHunt] = useState(c.huntPct);
+  const [tpNet, setTpNet] = useState(c.tpNet ?? 0.12);
   const [bal, setBal] = useState(c.cycleBalance);
   const [dirMode, setDirMode] = useState(c.directionMode);
   const [mode, setMode] = useState(c.mode);
@@ -421,6 +422,7 @@ function SettingsScreen() {
           <div><label className="lb">المستويات</label><input className="field" inputMode="numeric" value={levels} onChange={e => setLevels(e.target.value)} /></div>
           <div><label className="lb">خطوة الشبكة %</label><input className="field" inputMode="decimal" value={step} onChange={e => setStep(e.target.value)} /></div>
           <div><label className="lb">صيد %</label><input className="field" inputMode="decimal" value={hunt} onChange={e => setHunt(e.target.value)} /></div>
+          <div><label className="lb">جني الربح الصافي $</label><input className="field" inputMode="decimal" value={tpNet} onChange={e => setTpNet(e.target.value)} /></div>
           <div><label className="lb">رصيد الدورة $</label><input className="field" inputMode="decimal" value={bal} onChange={e => setBal(e.target.value)} /></div>
           <div>
             <label className="lb">الاتجاه</label>
@@ -443,7 +445,7 @@ function SettingsScreen() {
           ))}
         </div>
         <button className="btn acc" style={{ marginTop: 12, width: '100%' }}
-          onClick={() => saveCfg({ symbol, leverage: lev, levels, gridStepPct: step, huntPct: hunt, cycleBalance: bal, directionMode: dirMode, mode, sound: tone !== 'mute', soundTone: tone === 'mute' ? 'soft' : tone })}>
+          onClick={() => saveCfg({ symbol, leverage: lev, levels, gridStepPct: step, huntPct: hunt, tpNet, cycleBalance: bal, directionMode: dirMode, mode, sound: tone !== 'mute', soundTone: tone === 'mute' ? 'soft' : tone })}>
           حفظ المعاملات
         </button>
       </div>
