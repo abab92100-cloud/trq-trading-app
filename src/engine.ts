@@ -24,11 +24,12 @@ function tpBase(){ return Math.max(0.03,Number(S&&S.config&&S.config.tpNet)||TP_
 /* ---------- أدوات ---------- */
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
 const uid=p=>p+'_'+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-4);
-const fmtPx=n=>{ if(!n) return '—';
+const fmtPx=n=>{ n=Number(n); if(!n||!isFinite(n)||n<=0) return '—';
   if(n>=1000) return n.toLocaleString('en-US',{maximumFractionDigits:2});
   if(n>=1) return n.toFixed(2);
-  const s=n.toFixed(12).replace(/0+$/,'').replace(/\.$/,'');
-  return s.length>11 ? n.toPrecision(4) : s; };
+  // كسور صغيرة جدًا (عملات صفرية): منازل عشرية حقيقية حتى 12 خانة — لا صيغة علمية مثل 1.010e-10 أبدًا
+  const d=Math.min(12,Math.max(4,-Math.floor(Math.log10(n))+3));
+  return n.toFixed(d); };
 const fmtUsd=(n,d=2)=>{ const s=n<0?'-':n>0?'+':''; return s+Math.abs(n).toFixed(d); };
 const fmtTime=t=>new Date(t).toLocaleTimeString('en-GB',{hour12:false});
 const nextEma=(p,x,k)=>p==null?x:x*k+p*(1-k);
@@ -456,18 +457,23 @@ const exOrders = symbol => kcPrivate('GET','/api/v1/orders?status=active&symbol=
     return a.map(o=>({orderId:o.id,clientOid:o.clientOid||null,side:o.side==='sell'?'sell':'buy',
       price:+o.price,size:+o.size,reduceOnly:!!o.reduceOnly}));})
   .catch(()=>[]);
-/* رفض «وضع هامش الأمر لا يتطابق» — طابِق وضع الأمر مع وضع المركز الفعلي على المنصة قبل الإرسال */
+/* رفض «وضع هامش الأمر لا يتطابق» (KuCoin 330005) — القاعدة الرسمية: وضع الهامش في الأمر
+   يجب أن يطابق وضع الرمز الحالي في الحساب حرفيًا، وحقله في المركز اسمه marginMode (نص)،
+   وإن حُذف من الأمر يُفترض ISOLATED فيفشل على رموز CROSS. الحل: كشف الوضع الصحيح مرة،
+   ثم عند أي رفض جرّب كل الأوضاع واحفظ الفائز طويلًا — فتختفي العاصفة من أول نجاح */
 const mmTried={};
-// وضع الهامش يُخزَّن 60 ثانية لكل زوج — قراءته مع كل أمر كانت تضاعف طلبات التنفيذ
-const mmCache={};
+const mmCache={}; // وضع هامش كل زوج — يُكشف من المركز أو من أول نجاح ويُحفظ 10 دقائق
+function _mmFromPos(pos){ if(!pos) return null;
+  if(typeof pos.marginMode==='string'&&pos.marginMode) return pos.marginMode.toUpperCase();
+  if(typeof pos.crossMode==='boolean') return pos.crossMode?'CROSS':'ISOLATED';
+  return null; }
 async function placeOrderSmart(body){
-  try{ const cm=mmCache[body.symbol];
-    if(cm&&Date.now()-cm.at<60000){ if(cm.mode) body={...body,marginMode:cm.mode}; }
-    else { const pos=await kcPrivate('GET','/api/v1/position?symbol='+encodeURIComponent(body.symbol));
-      if(pos&&typeof pos.crossMode==='boolean'){
-        mmCache[body.symbol]={at:Date.now(),mode:pos.crossMode?'CROSS':'ISOLATED'};
-        body={...body,marginMode:pos.crossMode?'CROSS':'ISOLATED'}; }
-      else mmCache[body.symbol]={at:Date.now(),mode:null}; }
+  const sym=body.symbol;
+  try{ const cm=mmCache[sym];
+    if(cm&&cm.mode&&Date.now()-cm.at<600000){ body={...body,marginMode:cm.mode}; }
+    else { const pos=await kcPrivate('GET','/api/v1/position?symbol='+encodeURIComponent(sym));
+      const mm=_mmFromPos(pos);
+      if(mm){ mmCache[sym]={at:Date.now(),mode:mm}; body={...body,marginMode:mm}; } }
   }catch(_){}
   try{ return await kcPrivate('POST','/api/v1/orders',body); }
   catch(e){ let m=e.message||String(e);
@@ -476,15 +482,20 @@ async function placeOrderSmart(body){
       try{ return await kcPrivate('POST','/api/v1/orders',b3); }
       catch(e2){ m=e2.message||String(e2); body=b3; if(!/margin|هامش/i.test(m)) throw e2; } }
     if(!/margin|هامش/i.test(m)) throw e;
-    if(!mmTried[body.symbol]){ mmTried[body.symbol]=1;
-      try{ await kcPrivate('POST','/api/v1/marginMode/change',{symbol:body.symbol,marginMode:'ISOLATED'}); }catch(_){}
-      try{ await kcPrivate('POST','/api/v1/position/margin/change-margin-mode',{symbol:body.symbol,marginMode:'ISOLATED'}); }catch(_){}
-    }
-    // جرّب الوضع المعاكس صراحةً، ثم بلا حقل نهائيًا (يتبع وضع الحساب)
-    try{ const alt=body.marginMode==='ISOLATED'?'CROSS':'ISOLATED';
-      return await kcPrivate('POST','/api/v1/orders',{...body,marginMode:alt}); }catch(_){}
-    const b2={...body}; delete b2.marginMode;
-    return await kcPrivate('POST','/api/v1/orders',b2); } }
+    // سوِّ وضع الرمز إلى ISOLATED عبر نقطة KuCoin الرسمية v2 — تنجح فقط بلا مركز ولا أوامر
+    if(!mmTried[sym]){ mmTried[sym]=1;
+      try{ await kcPrivate('POST','/api/v2/position/batchChangeMarginMode',
+        {marginMode:'ISOLATED',symbols:[sym]}); }catch(_){} }
+    // جرّب كل الأوضاع بالتناوب واحفظ الفائز — أول نجاح يُسكت العاصفة نهائيًا
+    const errs=[m];
+    for(const alt of ['ISOLATED','CROSS',null]){
+      if(alt===body.marginMode) continue;
+      const b2={...body}; if(alt) b2.marginMode=alt; else delete b2.marginMode;
+      try{ const r=await kcPrivate('POST','/api/v1/orders',b2);
+        mmCache[sym]={at:Date.now(),mode:alt}; return r; }
+      catch(e3){ const m3=e3.message||String(e3); if(!errs.includes(m3)) errs.push(m3); } }
+    // فشل كل شيء: اعرض كل الأسباب الحقيقية لا آخرها فقط — الخطأ الخفي كان يُبتلع
+    throw new Error(errs.join(' | ')); } }
 function exPlaceLimit(intent){
   return placeOrderSmart({clientOid:intent.clientOid,symbol:intent.symbol,
     side:intent.side,type:'limit',price:String(intent.price),size:intent.qty,
@@ -518,10 +529,20 @@ async function exPing(){
 /* حارس خادمي: أمر إيقاف طوارئ يعيش على خوادم KuCoin نفسها — يقفل المركز قبل التصفية
    حتى لو انقطع التطبيق أو نام الجوال (آخر خط دفاع عند غياب البوت) */
 async function exPlaceStopGuard(){ if(S.config.mode!=='live'||!S.keys||!S.position) return;
-  const liq=S.exLiqPrice||S.position.liquidation||S.liqPrice||0; if(!liq) return;
-  const sh=S.position.side==='short';
-  // يقف قبل التصفية مباشرة وبعد خط هروب التطبيق (0.985/1.015) — خلف التصفية لا يحمي شيئًا أبدًا
-  const gp=sh?liq*0.99:liq*1.01;
+  const pos=S.position, sh=pos.side==='short';
+  const mark=S.markPrice||S.lastPrice||pos.entry||0; if(!(mark>0)) return;
+  // مركز CROSS لا تُرجع المنصة له سعر تصفية — فكان الحارس يُبنى على قيمة منحطة (~1e-10).
+  // المرساة الآن: الأسبق بين «قبل التصفية مباشرة» و«مسافة خسارة الكارثة 16$ من الدخول»
+  let liq=S.exLiqPrice||pos.liquidation||S.liqPrice||0;
+  if(!(liq>0)||(sh?liq<=mark*1.005:liq>=mark*0.995)) liq=0; // تصفية غير معقولة = لا تصفية
+  const e=pos.entry||mark;
+  const notional=Math.max(1e-9,pos.size*(S.multiplier||1)*e);
+  const dDis=LOSS_STOP_USD/notional*1.1; // حركة تعادل خسارة 16$ + هامش 10%
+  const cands=[sh?e*(1+dDis):e*(1-dDis)];
+  if(liq>0) cands.push(sh?liq*0.99:liq*1.01);
+  let gp=roundTick(sh?Math.min(...cands):Math.max(...cands),S.tickSize||1e-10);
+  // سلامة: سعر منحط أو ملاصق للسوق لا يحمي شيئًا — لا تُرسله
+  if(!(gp>0)||(sh?gp<=mark*1.003:gp>=mark*0.997)){ S._guardId=null; return; }
   // حارس قائم قريب من المطلوب = لا شيء — إعادة الإرسال كل دقيقة كانت تراكم أوامر وقف مكدسة
   if(S._guardId&&S._guardPx&&Math.abs(gp-S._guardPx)/S._guardPx<0.005) return;
   try{ if(S._guardId){ await exCancelStopOne(S._guardId); S._guardId=null; } // ألغِ القديم قبل الجديد — لا تكديس
@@ -681,23 +702,27 @@ export function memStepMult(){ const lv=sanctionLevel(S.config.direction);
   return 1; }
 function addStepPct(){ return Math.max(0.12,S.config.gridStepPct)*memStepMult()*(S.regime?S.regime.stepMult:1)*profStepMult(); }
 function tooClose(a,b,st){ return a>0&&b>0&&Math.abs(a-b)/Math.max(a,b)*100<st*0.55; }
-// أحجام متدرجة حسابيًا بقاعدة المالك: كل أمر يزيد نصف الأساس عن سابقه
-// (1، 1.5، 2، 2.5، 3... دولار هامش) — الأساس وعدد الأوامر يُشتقّان من السيولة
-// المتاحة: إن لم تسعف السيولة أساسًا ≥ $1 قُلّص عدد الأوامر تلقائيًا
+// أحجام متدرجة بنسبة المالك: 1 : 1.5 : 2 : 2.5 : 3 ... لكل مستوى —
+// لكن «الوحدة» تُشتق من رأس المال نفسه، لا تُنسخ من المثال حرفيًا:
+// 20% من رصيد الدورة احتياطي هامش لا يُتداول أبدًا، والباقي (80%) يُقسم على
+// مجموع النسب، فيخرج أول أمر = وحدة واحدة وكل لاحق يزيد نصف وحدة بالنسبة.
+// رصيد 100 → وحدة صغيرة · رصيد 186 → وحدة أكبر · ويتدرج تلقائيًا مع أي مبلغ
 function levelQtys(center,n){ const c=S.config;
   const cv=Math.max(1e-12,(S.multiplier||1)*center); // قيمة العقد الواحد بالدولار
   const lev=Math.max(1,c.leverage);
-  const total=Math.max(0,c.cycleBalance)*0.92; // احتياطي 8% للرسوم والانزلاق
+  const total=Math.max(0,c.cycleBalance)*0.80; // 20% احتياطي هامش — قاعدة المالك
   const used=S.journal.filter(j=>j.status==='open')
     .reduce((a,j)=>a+j.qty*(S.multiplier||1)*j.entry,0)/lev;
   const budget=Math.max(0,total-used) // هامش حرّ بالدولار
     *(S.regime?S.regime.sizeMult:1)*memSizeMult();
-  // مجموع السلم = base×(m + 0.25·m(m−1)) — قلّص العدد حتى يبلغ الأساس $1
+  // مجموع نسب السلم = m + 0.25·m(m−1) — الوحدة = الميزانية ÷ المجموع
+  const denom=mm=>mm+0.25*mm*(mm-1);
   let m=Math.max(1,n);
-  while(m>1&&budget/(m+0.25*m*(m-1))<1) m--;
-  const base=Math.max(1,budget/Math.max(1,m+0.25*m*(m-1)));
+  // قلّص العدد فقط إن عجز أصغر مستوى عن شراء عقد واحد — لا أرضية $1 تُفسد النسبة
+  while(m>1&&Math.floor((budget/denom(m))*lev/cv)<1) m--;
+  const unit=budget/denom(m);
   const out=[]; let acc=0;
-  for(let i=0;i<m;i++){ const q=Math.max(1,Math.floor(base*(1+0.5*i)*lev/cv));
+  for(let i=0;i<m;i++){ const q=Math.max(1,Math.floor(unit*(1+0.5*i)*lev/cv));
     if(acc+q*cv/lev>budget&&out.length) break; // لا تتجاوز السيولة أبدًا
     out.push(q); acc+=q*cv/lev; }
   return out; }
