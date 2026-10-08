@@ -192,6 +192,7 @@ export const S = {
     levels:12,direction:'short',directionMode:'auto',cycleBalance:100,mode:'paper',tpNet:0.12},
   status:'idle', heartbeat:0, lastPrice:null, markPrice:null,
   multiplier:1, tickSize:0.1, makerFee:0.0002, takerFee:0.0006, funding:0,
+  _metaSym:null, maxOrderQty:0, exAvail:null, // _metaSym: الرمز الذي وُثّقت مواصفات عقده — لا أمر حقيقي بدونها
   grid:[], position:null, journal:[], logs:[],
   history:[], linkOk:false, exEquity:null,
   realizedPnl:0, feesPaid:0, cycleHarvested:0,
@@ -477,11 +478,17 @@ async function placeOrderSmart(body){
   }catch(_){}
   try{ return await kcPrivate('POST','/api/v1/orders',body); }
   catch(e){ let m=e.message||String(e);
+    // تصنيف دقيق: «insufficient available margin» خطأ كمية/رصيد وليس وضع هامش —
+    // الخلط بينهما كان يدخل سلسلة الوضع ويُنتج «margin mode does not match» وهميًا
+    const isFunds=x=>/insufficient|too high|available margin|available balance/i.test(x);
+    const isMode =x=>/margin mode|330005/i.test(x);
     // رفض postOnly (السعر قاطع الدفتر): أعد المحاولة كأمر حدّي عادي — مستوى بعيد عابر لا يُفوَّت
-    if(body.postOnly){ const b3={...body}; delete b3.postOnly;
+    if(body.postOnly&&!isFunds(m)&&!isMode(m)){ const b3={...body}; delete b3.postOnly;
       try{ return await kcPrivate('POST','/api/v1/orders',b3); }
-      catch(e2){ m=e2.message||String(e2); body=b3; if(!/margin|هامش/i.test(m)) throw e2; } }
-    if(!/margin|هامش/i.test(m)) throw e;
+      catch(e2){ m=e2.message||String(e2); body=b3; } }
+    // رصيد/كمية: أبطِل توثيق المضاعف ليُعاد جلبه فورًا وارمِ — لا علاقة لوضع الهامش هنا
+    if(isFunds(m)){ S._metaAt=0; if(S._metaSym===sym) S._metaSym=null; throw e; }
+    if(!isMode(m)) throw e;
     // سوِّ وضع الرمز إلى ISOLATED عبر نقطة KuCoin الرسمية v2 — تنجح فقط بلا مركز ولا أوامر
     if(!mmTried[sym]){ mmTried[sym]=1;
       try{ await kcPrivate('POST','/api/v2/position/batchChangeMarginMode',
@@ -496,14 +503,24 @@ async function placeOrderSmart(body){
       catch(e3){ const m3=e3.message||String(e3); if(!errs.includes(m3)) errs.push(m3); } }
     // فشل كل شيء: اعرض كل الأسباب الحقيقية لا آخرها فقط — الخطأ الخفي كان يُبتلع
     throw new Error(errs.join(' | ')); } }
-function exPlaceLimit(intent){
+// بوابة التوثيق: لا أمر دخول حقيقي بكمية محسوبة محليًا قبل توثيق مضاعف العقد
+// من المنصة لهذا الرمز بالذات — كمية بمضاعف خاطئ تُرفض أو تفتح مركزًا كارثي الحجم
+async function ensureLiveMeta(symbol){ if(S._metaSym===symbol&&S.multiplier>0) return;
+  try{ const ct=await fetchContract(symbol); const mul=+ct.multiplier;
+    if(!(mul>0)) throw new Error('no multiplier');
+    S.multiplier=mul; S.tickSize=+ct.tickSize||S.tickSize; S._metaSym=symbol;
+    if(+ct.maxOrderQty>0) S.maxOrderQty=+ct.maxOrderQty; S._metaAt=Date.now();
+  }catch(_){ throw new Error('بيانات العقد غير جاهزة — أُجّل الأمر لحين توثيق المضاعف'); } }
+async function exPlaceLimit(intent){
+  await ensureLiveMeta(intent.symbol);
   return placeOrderSmart({clientOid:intent.clientOid,symbol:intent.symbol,
     side:intent.side,type:'limit',price:String(intent.price),size:intent.qty,
     leverage:String(intent.leverage),timeInForce:'GTC',reduceOnly:!!intent.reduceOnly,
     postOnly:true, // كل الأوامر الحدّية صانعة سوق: رسوم 0.02% بدل 0.06% — برأس مال صغير الفرق صافٍ حقيقي
     marginMode:'ISOLATED'});
 }
-function exPlaceMarket(symbol,side,qty){
+async function exPlaceMarket(symbol,side,qty){
+  await ensureLiveMeta(symbol);
   return placeOrderSmart({clientOid:'hunt_'+Date.now().toString(36),
     symbol,side,type:'market',size:qty,leverage:String(S.config.leverage),marginMode:'ISOLATED'});
 }
@@ -713,8 +730,11 @@ function levelQtys(center,n){ const c=S.config;
   const total=Math.max(0,c.cycleBalance)*0.80; // 20% احتياطي هامش — قاعدة المالك
   const used=S.journal.filter(j=>j.status==='open')
     .reduce((a,j)=>a+j.qty*(S.multiplier||1)*j.entry,0)/lev;
-  const budget=Math.max(0,total-used) // هامش حرّ بالدولار
+  let budget=Math.max(0,total-used) // هامش حرّ بالدولار
     *(S.regime?S.regime.sizeMult:1)*memSizeMult();
+  // الحقيقي يُحكَم بالمتاح الفعلي على المنصة لا برصيد الدورة المخطط —
+  // الهامش المحجوز بأوامر قائمة لا يظهر في «used» فيرفض الكميات الزائدة
+  if(c.mode==='live'&&S.exAvail>0) budget=Math.min(budget,S.exAvail*0.95);
   // مجموع نسب السلم = m + 0.25·m(m−1) — الوحدة = الميزانية ÷ المجموع
   const denom=mm=>mm+0.25*mm*(mm-1);
   let m=Math.max(1,n);
@@ -722,7 +742,8 @@ function levelQtys(center,n){ const c=S.config;
   while(m>1&&Math.floor((budget/denom(m))*lev/cv)<1) m--;
   const unit=budget/denom(m);
   const out=[]; let acc=0;
-  for(let i=0;i<m;i++){ const q=Math.max(1,Math.floor(unit*(1+0.5*i)*lev/cv));
+  for(let i=0;i<m;i++){ let q=Math.max(1,Math.floor(unit*(1+0.5*i)*lev/cv));
+    if(S.maxOrderQty>0) q=Math.min(q,S.maxOrderQty); // سقف المنصة للأمر الواحد
     if(acc+q*cv/lev>budget&&out.length) break; // لا تتجاوز السيولة أبدًا
     out.push(q); acc+=q*cv/lev; }
   return out; }
@@ -1112,11 +1133,13 @@ function dangerVeto(p){ const short=S.config.direction==='short';
   // صدمة سعرية تقود عكس اتجاه الصيد بقوة
   if(r.shock){ if(short&&conf.momentum>0.3) return 'صدمة صاعدة عنيفة ضد الشورت';
     if(!short&&conf.momentum<-0.3) return 'صدمة هابطة عنيفة ضد اللونغ'; }
-  // جدار لاصق مباشرة (<0.10%) بحجم 6 أضعاف الوسيط — مصيدة محققة لا مجرد مقاومة
+  // جدار لاصق مباشرة (<0.07%) بحجم 8 أضعاف الوسيط — مصيدة محققة لا مجرد مقاومة.
+  // (كان 0.10%/6× يخنق الصيد على العملات الصفريّة كثيفة الدفاتر — جدار عادي
+  //  يُقرأ خطرًا دائمًا فلا صفقات؛ الجدار الحقيقي اللاصق أقرب وأضخم)
   const ob=S.orderBook, lp=S.lastPrice||0;
   if(ob&&ob.bids.length&&ob.asks.length&&lp>0){ const medL=medLevelSz(ob);
-    if(medL>0){ if(!short){ for(const a of ob.asks.slice(0,5)){ if(a.price>lp&&(a.price-lp)/lp*100<0.10&&a.size>medL*6) return 'جدار بيع لاصق فوق السعر'; } }
-      else { for(const b of ob.bids.slice(0,5)){ if(b.price<lp&&(lp-b.price)/lp*100<0.10&&b.size>medL*6) return 'جدار شراء لاصق تحت السعر'; } } } }
+    if(medL>0){ if(!short){ for(const a of ob.asks.slice(0,5)){ if(a.price>lp&&(a.price-lp)/lp*100<0.07&&a.size>medL*8) return 'جدار بيع لاصق فوق السعر'; } }
+      else { for(const b of ob.bids.slice(0,5)){ if(b.price<lp&&(lp-b.price)/lp*100<0.07&&b.size>medL*8) return 'جدار شراء لاصق تحت السعر'; } } } }
   // سيل حيتان هائل عكس الاتجاه (تدفق مهيمن + حجم استثنائي)
   const f=tapeFlow();
   if(f.whaleVol>0.4){ if(short&&f.whale>0.7) return 'سيل شراء حيتان مهيمن'; if(!short&&f.whale<-0.7) return 'سيل بيع حيتان مهيمن'; }
@@ -1551,8 +1574,13 @@ async function loadMarket(full){
     S.makerFee=normFee(ct.makerFeeRate??ct.makerFeeCoefficient,S.makerFee);
     S.takerFee=normFee(ct.takerFeeRate??ct.takerFeeCoefficient,S.takerFee);
     S.funding=+ct.fundingFeeRate||0;
-    S.multiplier=+ct.multiplier||1;
-    S.tickSize=+ct.tickSize||0.1;
+    // المضاعف لا يُلمس إلا بقيمة حقيقية من المنصة — multiplier=1 الافتراضي على
+    // عملة مثل PEPE (العقد=520,000 وحدّة) يضخّم الكمية 520 ألف ضعف فترفض
+    // المنصة كل أمر: «Order quantity is too high, insufficient available margin»
+    const _mul=+ct.multiplier, _tk=+ct.tickSize;
+    if(_mul>0){ S.multiplier=_mul; S._metaSym=c; }
+    if(_tk>0) S.tickSize=_tk;
+    if(+ct.maxOrderQty>0) S.maxOrderQty=+ct.maxOrderQty;
     if(!price) price=mark;
   }
   const m={price,markPrice:mark};
@@ -1574,6 +1602,7 @@ async function loadMarket(full){
 
 // كبح أخطاء المزامنة على السيرفر — لا window في Node: متغيرات وحدات عادية
 let _ordErrAt=0, _syncErrAt=0, _syncErrMsg='';
+let _huntErrAt=0; // خنق فشل الصيد — كل ثانية كان يغرق السجل بلا فائدة
 async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
   const sym=S.config.symbol;
   try{
@@ -1585,6 +1614,11 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
         if(pos.liquidation) S.position.liquidation=pos.liquidation; } }
     else if(S.position&&Date.now()>S.ignoreExchangeUntil){ S.position=null; S._guardPx=0; S._guardId=null; }
     if(pos&&pos.liquidation) S.exLiqPrice=pos.liquidation;
+    // الرصيد المتاح الحقيقي كل 30 ثانية — حدّ الميزانية به يمنع رفض
+    // «insufficient available margin» عندما يكون الهامش محجوزًا كله بالأوامر
+    if(!S._accAt||Date.now()-S._accAt>30000){ S._accAt=Date.now();
+      kcPrivate('GET','/api/v1/account-overview?currency=USDT').then(a=>{
+        const av=Number(a&&a.availableBalance); if(av>=0&&isFinite(av)) S.exAvail=av; }).catch(()=>{}); }
     if(S.position) exPlaceStopGuard(); // إيقاف طوارئ على المنصة يحمي المركز حتى لو نام التطبيق
   }catch(e){ const m=e.message||String(e);
     if(m!==_syncErrMsg||Date.now()-_syncErrAt>60000){ _syncErrAt=Date.now(); _syncErrMsg=m;
@@ -1699,7 +1733,8 @@ async function botTick(){
             if(/access denied|permission/i.test(m)){ S.permDenied=true;
               pushLog('error','⛔ المفتاح بلا صلاحية تداول — فعّل «التداول» للعقود الآجلة في KuCoin ثم احفظ المفاتيح مجددًا');
               toast('⚠️ فعّل صلاحية التداول في مفتاح KuCoin'); }
-            else pushLog('error','فشل صيد السوق: '+m); } }
+            else { if(Date.now()-_huntErrAt>60000){ _huntErrAt=Date.now();
+              pushLog('error','فشل صيد السوق: '+m); } } } }
         else done=true;
         if(done) maybeHunt(price); }
       ensureGrid(); harvestRipe(price);
@@ -1835,6 +1870,9 @@ export function saveCfg(v){
     S.grid=[]; S.position=null; S.journal=[];
     S.realizedPnl=0; S.feesPaid=0; S.ignoreExchangeUntil=Date.now()+12000;
     S.tape=[]; S.priceTrail=[]; S.emaFast=S.emaSlow=null; S._metaAt=0;
+    // مضاعف العملة السابقة سمّ زاعف للجديدة (عقد PEPE = 520 ألف وحدة!) —
+    // يُصفَّر ويُحجب التداول الحقيقي حتى تُوثَّق مواصفات العقد الجديد
+    S.multiplier=1; S.tickSize=0.1; S._metaSym=null; S.maxOrderQty=0;
     S.lastPrice=null; S.markPrice=null; S.lastTickAt=null; S.cvd=0;
     S.orderBook={bids:[],asks:[]}; S.biasScore=0; S.biasReasons=[];
     S.regime=null; S.confluence=null; S.heartbeat=0;
