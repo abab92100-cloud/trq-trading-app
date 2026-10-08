@@ -27,8 +27,9 @@ const uid=p=>p+'_'+Math.random().toString(36).slice(2,10)+Date.now().toString(36
 const fmtPx=n=>{ n=Number(n); if(!n||!isFinite(n)||n<=0) return '—';
   if(n>=1000) return n.toLocaleString('en-US',{maximumFractionDigits:2});
   if(n>=1) return n.toFixed(2);
-  // كسور صغيرة جدًا (عملات صفرية): منازل عشرية حقيقية حتى 12 خانة — لا صيغة علمية مثل 1.010e-10 أبدًا
-  const d=Math.min(12,Math.max(4,-Math.floor(Math.log10(n))+3));
+  // كسور صغيرة جدًا (عملات صفرية): منازل عشرية حقيقية حتى 12 خانة — لا صيغة علمية،
+  // وبدقة تطابق عرض المنصة (0.0000040212 لا 0.000004021) حتى لا يُظن اختلافًا بالدخول
+  const d=Math.min(12,Math.max(4,-Math.floor(Math.log10(n))+4));
   return n.toFixed(d); };
 const fmtUsd=(n,d=2)=>{ const s=n<0?'-':n>0?'+':''; return s+Math.abs(n).toFixed(d); };
 const fmtTime=t=>new Date(t).toLocaleTimeString('en-GB',{hour12:false});
@@ -192,7 +193,7 @@ export const S = {
     levels:12,direction:'short',directionMode:'auto',cycleBalance:100,mode:'paper',tpNet:0.12},
   status:'idle', heartbeat:0, lastPrice:null, markPrice:null,
   multiplier:1, tickSize:0.1, makerFee:0.0002, takerFee:0.0006, funding:0,
-  _metaSym:null, maxOrderQty:0, exAvail:null, // _metaSym: الرمز الذي وُثّقت مواصفات عقده — لا أمر حقيقي بدونها
+  _metaSym:null, maxOrderQty:0, exAvail:null, exLeverage:null, // _metaSym: الرمز الذي وُثّقت مواصفات عقده — لا أمر حقيقي بدونها
   grid:[], position:null, journal:[], logs:[],
   history:[], linkOk:false, exEquity:null,
   realizedPnl:0, feesPaid:0, cycleHarvested:0,
@@ -448,7 +449,8 @@ async function exPosition(symbol){
   if(qty===0) return null;
   return {side:qty<0?'short':'long', size:Math.abs(qty),
     entry:Number(p.avgEntryPrice)||S.lastPrice||0,
-    leverage:Number(p.leverage)||S.config.leverage,
+    // الرافعة الحقيقية المطبّقة على المنصة — قد تخالف المضبوط (CROSS يتجاهل رافعة الأمر)
+    leverage:Number(p.realLeverage)||Number(p.leverage)||S.config.leverage,
     unrealized:Number(p.unrealisedPnl)||0,
     liquidation:Number(p.liquidationPrice)||null,
     openedAt:Date.now()};
@@ -515,14 +517,14 @@ async function exPlaceLimit(intent){
   await ensureLiveMeta(intent.symbol);
   return placeOrderSmart({clientOid:intent.clientOid,symbol:intent.symbol,
     side:intent.side,type:'limit',price:String(intent.price),size:intent.qty,
-    leverage:String(intent.leverage),timeInForce:'GTC',reduceOnly:!!intent.reduceOnly,
+    leverage:Number(intent.leverage)||Number(S.config.leverage)||1,timeInForce:'GTC',reduceOnly:!!intent.reduceOnly,
     postOnly:true, // كل الأوامر الحدّية صانعة سوق: رسوم 0.02% بدل 0.06% — برأس مال صغير الفرق صافٍ حقيقي
     marginMode:'ISOLATED'});
 }
 async function exPlaceMarket(symbol,side,qty){
   await ensureLiveMeta(symbol);
   return placeOrderSmart({clientOid:'hunt_'+Date.now().toString(36),
-    symbol,side,type:'market',size:qty,leverage:String(S.config.leverage),marginMode:'ISOLATED'});
+    symbol,side,type:'market',size:qty,leverage:Number(S.config.leverage)||1,marginMode:'ISOLATED'});
 }
 const exCancelAll = symbol => kcPrivate('DELETE','/api/v1/orders?symbol='+encodeURIComponent(symbol)).catch(()=>{});
 const exCancelOne = id => kcPrivate('DELETE','/api/v1/orders/'+id).catch(()=>{});
@@ -726,7 +728,9 @@ function tooClose(a,b,st){ return a>0&&b>0&&Math.abs(a-b)/Math.max(a,b)*100<st*0
 // رصيد 100 → وحدة صغيرة · رصيد 186 → وحدة أكبر · ويتدرج تلقائيًا مع أي مبلغ
 function levelQtys(center,n){ const c=S.config;
   const cv=Math.max(1e-12,(S.multiplier||1)*center); // قيمة العقد الواحد بالدولار
-  const lev=Math.max(1,c.leverage);
+  // الحقيقي يُحجَّم بالرافعة المطبّقة فعلًا على المنصة لا المضبوطة — رافعة CROSS
+  // المفروضة (3×) بتحجيم 15× تعني هامشًا محجوزًا 5 أضعاف المخطط ورفضًا للأوامر
+  const lev=Math.max(1, c.mode==='live'&&S.exLeverage?S.exLeverage:c.leverage);
   const total=Math.max(0,c.cycleBalance)*0.80; // 20% احتياطي هامش — قاعدة المالك
   const used=S.journal.filter(j=>j.status==='open')
     .reduce((a,j)=>a+j.qty*(S.multiplier||1)*j.entry,0)/lev;
@@ -1355,8 +1359,13 @@ function computeLiq(){ const dir=S.position?S.position.side:S.config.direction;
   const den=q*mult*(1+mmr+liqFee); if(den<=0) return null;
   return (notional+margin)/den; }
 function refreshLiq(){ const local=computeLiq();
-  if(S.exLiqPrice&&S.exLiqPrice>0&&!S.grid.some(g=>!g.reduceOnly&&g.status==='armed'&&!g.exchangeOrderId)){
-    S.liqPrice=S.exLiqPrice; }
+  // تصفية المنصة قد ترجع منحطة (1e-10 لمراكز CROSS) — قيمة كهذه لا تُعرض ولا
+  // يُبنى عليها حارس أو إنذار: المحسوب محليًا من الهامش والرافعة الحقيقية أصدق
+  let ex=S.exLiqPrice||0; const e=S.position?S.position.entry:0;
+  if(ex>0&&e>0&&S.position){ const sh=S.position.side==='short';
+    if(sh?ex>e*20:ex<e*0.05) ex=0; } // منحط لا شك فيه — تجاهله
+  if(ex>0&&!S.grid.some(g=>!g.reduceOnly&&g.status==='armed'&&!g.exchangeOrderId)){
+    S.liqPrice=ex; }
   else S.liqPrice=local;
   if(S.position) S.position.liquidation=S.liqPrice; }
 function markUnrealized(p){ if(S.position){
@@ -1619,6 +1628,23 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
     if(!S._accAt||Date.now()-S._accAt>30000){ S._accAt=Date.now();
       kcPrivate('GET','/api/v1/account-overview?currency=USDT').then(a=>{
         const av=Number(a&&a.availableBalance); if(av>=0&&isFinite(av)) S.exAvail=av; }).catch(()=>{}); }
+    // اعتماد الرافعة الحقيقية المطبّقة على المنصة — CROSS يتجاهل رافعة الأمر
+    // ويطبّق رافعته (رأينا 3× بدل 15× فاختل الهامش كليًا عن حساب البوت)
+    if(pos&&pos.leverage>0){ S.exLeverage=pos.leverage;
+      const cfgL=S.config.leverage||1;
+      if(Math.abs(pos.leverage-cfgL)/cfgL>0.1&&(!S._levWarnAt||Date.now()-S._levWarnAt>3600000)){
+        S._levWarnAt=Date.now();
+        pushLog('server','المنصة طبّقت رافعة '+pos.leverage+'× بدل المضبوط '+cfgL+
+          '× — الأحجام تُحسب بالرافعة الحقيقية، وسيُفرض الوضع المعزول عند أول فراغ'); } }
+    // لا مركز الآن: صفّر الرافعة المقروءة (لا تُحجِّم الجديد برافعة مركز سابق)
+    // وفرّض ISOLATED (يُفعّل رافعة الأمر) + اضبط رافعة CROSS احتياطًا —
+    // التبديل مخنوق كل 5 دقائق وينجح فقط بلا مراكز ولا أوامر معلقة
+    if(!pos){ S.exLeverage=null;
+      if(!S._mmFixAt||Date.now()-S._mmFixAt>300000){ S._mmFixAt=Date.now();
+        kcPrivate('POST','/api/v2/position/batchChangeMarginMode',{marginMode:'ISOLATED',symbols:[sym]})
+          .then(()=>{ delete mmCache[sym]; }).catch(()=>{});
+        kcPrivate('POST','/api/v2/changeCrossUserLeverage',
+          {symbol:sym,leverage:String(S.config.leverage)}).catch(()=>{}); } }
     if(S.position) exPlaceStopGuard(); // إيقاف طوارئ على المنصة يحمي المركز حتى لو نام التطبيق
   }catch(e){ const m=e.message||String(e);
     if(m!==_syncErrMsg||Date.now()-_syncErrAt>60000){ _syncErrAt=Date.now(); _syncErrMsg=m;
