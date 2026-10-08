@@ -706,19 +706,14 @@ function contractsForLevel(p){ const q=levelQtys(p,effLevels()); return q.length
 // المستويات الفعّالة: رأس المال الصغير يُركَّز لا يُفتَّت —
 // عدد يضمن أن يغطي جني كل مستوى هدف الصافي $0.12 بخطوة شبكة واحدة بعد الرسوم
 export function effLevels(){ const c=S.config;
-  const step=Math.max(0.12,addStepPct())/100;
-  const fees=(S.makerFee||0.0002)+(S.takerFee||0.0006);
-  const minN=tpBase()/Math.max(0.0005,step-fees); // أقل قيمة صفقة تحقق جنيًا مجديًا
-  const budget=Math.max(0,c.cycleBalance)*Math.max(1,c.leverage);
-  let m=clamp(Math.floor(budget/minN),4,Math.max(4,c.levels));
-  // وحدة أولى مجدية بأمر المالك: التقسيم تدريجي نسبي حسب الرصيد — لا «أول أمر
-  // $1» أبدًا. 16 مستوى متدرجًا من ميزانية $77 لا يعطي رياضيًا إلا $1 للأول،
-  // لذا يُقلَّص العدد تلقائيًا حتى تبلغ الوحدة الأولى 3% من ميزانية التداول أو
-  // $2 (أيهما أكبر): رصيد $97 ⟵ ~10 مستويات تبدأ بـ $2.4 ثم 3.6/4.8/6...
-  const trade=Math.max(0,c.cycleBalance)*0.80;
-  const minUnit=Math.max(2,trade*0.03);
-  const denom=mm=>mm+0.25*mm*(mm-1);
-  while(m>4&&trade/denom(m)<minUnit) m--;
+  // العدد = إعداد المالك حرفيًا (جدوله: 12 / 16 / 25 مستوى حسب ضبطه) —
+  // التقسيم التدريجي يوزّع 80% من الرصيد عليها كلها بنسب 1:1.5:2...
+  // لا تركيز تلقائي ولا أرضية وحدة تفسد النسبة — القسمة طاعة للجدول فقط
+  let m=clamp(Math.round(c.levels)||12,1,64);
+  const p=S.lastPrice||0, cv=Math.max(1e-12,(S.multiplier||1)*p), lev=Math.max(1,c.leverage);
+  const total=Math.max(0,c.cycleBalance)*0.80, denom=mm=>mm+0.25*mm*(mm-1);
+  // تقليص وحيد مقبول: أصغر مستوى عجز عن شراء عقد واحد حقيقي
+  if(p>0) while(m>1&&Math.floor((total/denom(m))*lev/cv)<1) m--;
   return m; }
 // مضاعف خطوة الشبكة المستمد من الذاكرة القوية:
 // زوج/اتجاه رابح تاريخيًا → خطوة أضيق (التقاط أكثر) · خاسر → خطوة أوسع (حذر أكبر)
@@ -752,10 +747,6 @@ function levelQtys(center,n){ const c=S.config;
   // مجموع نسب السلم = m + 0.25·m(m−1) — الوحدة = الميزانية ÷ المجموع
   const denom=mm=>mm+0.25*mm*(mm-1);
   let m=Math.max(1,n);
-  // أرضية الوحدة الأولى بالميزانية الفعلية (بعد خصم المفتوح وحدّ المتاح) —
-  // نفس قاعدة effLevels حتى لا تتناقض الأحجام مع العدد المعلن
-  const minUnit=Math.max(2,total*0.03);
-  while(m>4&&budget/denom(m)<minUnit) m--;
   // قلّص العدد فقط إن عجز أصغر مستوى عن شراء عقد واحد — لا أرضية $1 تُفسد النسبة
   while(m>1&&Math.floor((budget/denom(m))*lev/cv)<1) m--;
   const unit=budget/denom(m);
