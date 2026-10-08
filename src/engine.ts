@@ -459,7 +459,7 @@ const exOrders = symbol => kcPrivate('GET','/api/v1/orders?status=active&symbol=
   .then(d=>{const a=Array.isArray(d)?d:(d.items||[]);
     return a.map(o=>({orderId:o.id,clientOid:o.clientOid||null,side:o.side==='sell'?'sell':'buy',
       price:+o.price,size:+o.size,filledSize:+(o.filledSize??o.dealSize??0)||0,reduceOnly:!!o.reduceOnly}));})
-  .catch(()=>[]);
+  .catch(()=>null); // null = فشل القراءة — جولة مزامنة تُتخطى كاملة، لا «لا أوامر» زائفة تفكك الشبكة
 /* رفض «وضع هامش الأمر لا يتطابق» (KuCoin 330005) — القاعدة الرسمية: وضع الهامش في الأمر
    يجب أن يطابق وضع الرمز الحالي في الحساب حرفيًا، وحقله في المركز اسمه marginMode (نص)،
    وإن حُذف من الأمر يُفترض ISOLATED فيفشل على رموز CROSS. الحل: كشف الوضع الصحيح مرة،
@@ -847,14 +847,16 @@ function applyDelta(side,qty,price){ const dir=side==='sell'?'short':'long';
     S._exc={mae:0,mfe:0}; S._tpBanked=0;
     return {realized:pnl,closedQty:closeQty,addedQty:leftover}; }
   return {realized:pnl,closedQty:closeQty,addedQty:0}; }
-function noteEntry(qty,price,fee,source){ const side=S.position?S.position.side:(source==='hunt'?S.config.direction:'short');
+function noteEntry(qty,price,fee,source,noCount){ const side=S.position?S.position.side:(source==='hunt'?S.config.direction:'short');
   // لقطة ظروف الدخول لحظتها — تُختم على الصفقة عند إغلاقها في الذاكرة
   S._entryCtx={rg:S.regime?(S.regime.shock?'صدمة':S.regime.trend==='up'?'صاعد':S.regime.trend==='down'?'هابط':'عرضي'):'عرضي',
     ses:sessionOf(Date.now()),origin:source==='hunt'?'صيد':'شبكة',at:Date.now()};
   const label=source==='hunt'?'صفقة':'شبكة';
   const ex=S.journal.find(j=>j.status==='open'&&j.side===side);
   if(ex){ const t=ex.qty+qty; ex.entry=(ex.entry*ex.qty+price*qty)/t; ex.qty=t;
-    ex.mergedOrders=(ex.mergedOrders||1)+1; ex.fees+=fee;
+    // الاعتمادات الجزئية المتتالية لنفس المستوى لا ترفع عدد الأوامر —
+    // تضخم العدّاد كان يوهم addsBlocked بامتلاء الشبكة فيلغي تسليحها كاملة
+    if(!noCount) ex.mergedOrders=(ex.mergedOrders||1)+1; ex.fees+=fee;
     if(S.position) ex.entry=S.position.entry;
     if(ex.source!==label) ex.source='مركز';
     if(S.activeCycle){S.activeCycle.fills++;S.activeCycle.entry=S.position?S.position.entry:ex.entry;}
@@ -1026,8 +1028,8 @@ function creditExFill(l,delta,fp){ if(!(delta>0)||!(fp>0)) return false;
   if(!l.reduceOnly){
     const fee=feeFor(delta*mult*fp,false); S.feesPaid+=fee;
     const dd=applyDelta(l.side,delta,fp);
-    if(dd.addedQty>0){ const lotId=noteEntry(dd.addedQty,fp,fee,l.origin==='hunt'?'hunt':'grid');
-      l.lotId=l.lotId||lotId; }
+    if(dd.addedQty>0){ const lotId=noteEntry(dd.addedQty,fp,fee,l.origin==='hunt'?'hunt':'grid',
+      !!l._counted); l._counted=true; l.lotId=l.lotId||lotId; }
     S.lastAddAt=Date.now();
     if(l.qty-(l.exFilled||0)>1e-9) pushLog('server','تنفيذ جزئي: دُخل '+delta+' من '+l.qty+
       ' @ '+fmtPx(fp)+' — الباقي معلّق يُكمل أو يُلغى عند الجني');
@@ -1459,8 +1461,14 @@ function computeLiq(){ const dir=S.position?S.position.side:S.config.direction;
   const mmr=lev>=75?0.025:lev>=50?0.012:lev>=25?0.008:lev>=10?0.005:0.004;
   const liqFee=Math.max(S.takerFee,0.0005);
   const notional=entry*q*mult;
-  // هامش معزول حقيقي = قيمة المركز ÷ الرافعة (+ الربح الجاري) — وليس رصيد الدورة كاملًا
-  const margin=notional/lev+(S.position?Math.max(0,S.position.unrealized||0):0);
+  // هامش CROSS الحقيقي = هامش المركز + الرصيد المتاح كله يدعمه (قاعدة المالك:
+  // متبادل دائمًا). الحساب المعزول القديم (notional/lev فقط) كان يقرّب سعر
+  // التصفية وهميًا فيُطلق «خطر تصفية» كاذب ويُغلق المركز بخسارة لا وجود لها
+  const curNotional=(S.position?S.position.size*mult*(S.position.entry||entry):0)||notional;
+  const backing=S.config.mode==='live'
+    ? curNotional/lev+Math.max(0,(S.exAvail||0)*0.95)
+    : Math.max(0,S.config.cycleBalance||0);
+  const margin=backing+Math.max(0,S.position?S.position.unrealized||0:0);
   if(dir==='long'){ const den=q*mult*(1-mmr-liqFee); if(den<=0) return null;
     const lp=(notional-margin)/den; return lp>0?lp:null; }
   const den=q*mult*(1+mmr+liqFee); if(den<=0) return null;
@@ -1761,6 +1769,10 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
       pushLog('error','قراءة المركز: '+m); } }
   try{
     const exs=await exOrders(sym);
+    // فشل قراءة الأوامر (شبكة/حصة)؟ تخطَّ الجولة كاملة بلا أي تغيير حالة —
+    // اعتبار الفشل «قائمة فارغة» كان يعيد تسليح كل مستوى فيضاعف الأوامر على
+    // المنصة ويحجز الهامش حتى تنهار الأحجام (كارثة الـ17 أمرًا اليتيمة)
+    if(!exs) return;
     const byOid=new Map(exs.map(o=>[o.clientOid||'',o]));
     const byId=new Map(exs.map(o=>[o.orderId,o]));
     for(const l of S.grid){ if(l.status==='cancelled'||l.status==='filled') continue;
@@ -1972,7 +1984,7 @@ export function newCycle(){ if(R()){ remoteCmd('newCycle').then(()=>remoteSync()
     activeCycle:null,huntCount:0,huntOpen:0,priceTrail:[],emaFast:null,emaSlow:null,
     cvd:0,tape:[],orderBook:{bids:[],asks:[]},status:'idle',startedAt:null,
     huntAnchor:null,gridAnchor:null,liqPrice:null,exLiqPrice:null,_memBlockAt:0,
-    cycleHarvested:0,_posPeakNet:null,_spikeDone:false,_posNetPrev:null,_spikePosId:null});
+    cycleHarvested:0,_tpBanked:0,_posPeakNet:null,_spikeDone:false,_posNetPrev:null,_spikePosId:null});
   S.config=cfg; S.keys=keys; S.sound=snd; S.soundTone=tone;
   pushLog('info','دورة جديدة برصيد $'+rolled.toFixed(2)+' — مُسحت السجلات وبدأت صفحة نظيفة');
   toast('دورة جديدة برصيد $'+rolled.toFixed(2));
@@ -2020,7 +2032,7 @@ export function saveCfg(v){
       if(S.position) exCloseQty(old,S.position.side,S.position.size)
         .catch(e=>pushLog('error','إغلاق مركز الزوج السابق فشل: '+(e.message||e)));
       pushLog('server','أُلغيت أوامر ووقف '+old+' وأُغلق مركزه قبل الانتقال'); }
-    S.grid=[]; S.position=null; S.journal=[];
+    S.grid=[]; S.position=null; S.journal=[]; S._tpBanked=0;
     S.realizedPnl=0; S.feesPaid=0; S.ignoreExchangeUntil=Date.now()+12000;
     S.tape=[]; S.priceTrail=[]; S.emaFast=S.emaSlow=null; S._metaAt=0;
     // مضاعف العملة السابقة سمّ زاعف للجديدة (عقد PEPE = 520 ألف وحدة!) —
