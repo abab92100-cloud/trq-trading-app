@@ -460,6 +460,12 @@ const exOrders = symbol => kcPrivate('GET','/api/v1/orders?status=active&symbol=
     return a.map(o=>({orderId:o.id,clientOid:o.clientOid||null,side:o.side==='sell'?'sell':'buy',
       price:+o.price,size:+o.size,filledSize:+(o.filledSize??o.dealSize??0)||0,reduceOnly:!!o.reduceOnly}));})
   .catch(()=>null); // null = فشل القراءة — جولة مزامنة تُتخطى كاملة، لا «لا أوامر» زائفة تفكك الشبكة
+// قائمة أوامر الوقف — قناة منفصلة عن الأوامر العادية لا يطالها كنس اليتيمة
+// العادي، ولهذا تراكمت 9 ستوبات على مركز المالك. null = فشل قراءة = لا كنس أعمى
+const exStops = symbol => kcPrivate('GET','/api/v1/stopOrders?symbol='+encodeURIComponent(symbol))
+  .then(d=>{const a=Array.isArray(d)?d:(d.items||[]);
+    return a.map(o=>({id:o.id||o.orderId||'',stopPrice:+(o.stopPrice??o.price??0)||0}));})
+  .catch(()=>null);
 /* رفض «وضع هامش الأمر لا يتطابق» (KuCoin 330005) — القاعدة الرسمية: وضع الهامش في الأمر
    يجب أن يطابق وضع الرمز الحالي في الحساب حرفيًا، وحقله في المركز اسمه marginMode (نص)،
    وإن حُذف من الأمر يُفترض ISOLATED فيفشل على رموز CROSS. الحل: كشف الوضع الصحيح مرة،
@@ -565,7 +571,10 @@ async function exPlaceStopGuard(){ if(S.config.mode!=='live'||!S.keys||!S.positi
   if(!(gp>0)||(sh?gp<=mark*1.003:gp>=mark*0.997)){ S._guardId=null; return; }
   // حارس قائم قريب من المطلوب = لا شيء — إعادة الإرسال كل دقيقة كانت تراكم أوامر وقف مكدسة
   if(S._guardId&&S._guardPx&&Math.abs(gp-S._guardPx)/S._guardPx<0.005) return;
-  try{ if(S._guardId){ await exCancelStopOne(S._guardId); S._guardId=null; } // ألغِ القديم قبل الجديد — لا تكديس
+  try{ // حارس واحد أبدي: قبل وضع الجديد احذف كل ستوبات الزوج — الاعتماد على
+    // المعرّف المحلي _guardId كان يفقده عند إعادة تشغيل التطبيق فتبقى القديمة
+    // على المنصة للأبد وتتراكم (كارثة الـ9 ستوبات المكدسة على مركز المالك)
+    await exCancelStops(S.config.symbol); S._guardId=null;
     // عبر placeOrderSmart: الحارس كان يُرسَل بلا marginMode فيُرفض تمامًا —
     // آخر خط دفاع كان معطّلًا عمليًا عند أي مركز CROSS
     const r=await placeOrderSmart({clientOid:'grd_'+Date.now().toString(36),
@@ -602,6 +611,14 @@ function adversePct(p){ const pos=S.position; if(!pos||!p||!pos.entry) return 0;
   return pos.side==='short'?((p-pos.entry)/pos.entry)*100:((pos.entry-p)/pos.entry)*100; }
 function lastJumpPct(){ const t=S.priceTrail; if(t.length<2) return 0;
   const a=t[t.length-2],b=t[t.length-1]; return a>0?Math.abs(b-a)/a*100:0; }
+// حجم الموجة المعاكسة المتدرجة خلال 60 ثانية: ارتفاع السعر عن قاع النافذة (للشورت)
+// أو هبوطه عن قمتها (للونغ) — يكشف الموجات الثابتة التي لا تراها قفزة النبضة
+// الواحدة (كارثة كنس 9 مستويات دفعة واحدة في موجة صاعدة بطيئة)
+function waveAdversePct(){ const pos=S.position,t=S.priceTrail;
+  if(!pos||t.length<10) return 0;
+  const w=t.slice(-60), p=t[t.length-1]; if(!(p>0)) return 0;
+  if(pos.side==='short'){ const lo=Math.min(...w); return lo>0?(p-lo)/lo*100:0; }
+  const hi=Math.max(...w); return hi>0?(hi-p)/hi*100:0; }
 function bookQuality(){ const b=S.orderBook,p=S.lastPrice||0;
   if(!b||!b.bids.length||!b.asks.length||!p) return true;
   const bb=b.bids[0].price,ba=b.asks[0].price;
@@ -743,7 +760,11 @@ function levelQtys(center,n){ const c=S.config;
     *(S.regime?S.regime.sizeMult:1)*memSizeMult();
   // الحقيقي يُحكَم بالمتاح الفعلي على المنصة لا برصيد الدورة المخطط —
   // الهامش المحجوز بأوامر قائمة لا يظهر في «used» فيرفض الكميات الزائدة
-  if(c.mode==='live'&&S.exAvail>0) budget=Math.min(budget,S.exAvail*0.95);
+  // الميزانية الحية تُحكَم برصيد الحساب الكلي (equity) لا بـ«المتاح» اللحظي:
+  // المتاح ينهار لحظة حجز الأوامر المركونة فيتقلص السلم ثم يتمدد — حلقة هدم
+  // وإعادة بناء ورفض «insufficient available margin» عند كل أمر جديد
+  if(c.mode==='live'&&S.exEquity>0) budget=Math.min(budget,Math.max(0,S.exEquity*0.95-used));
+  else if(c.mode==='live'&&S.exAvail>0) budget=Math.min(budget,S.exAvail*0.95);
   // مجموع نسب السلم = m + 0.25·m(m−1) — الوحدة = الميزانية ÷ المجموع
   const denom=mm=>mm+0.25*mm*(mm-1);
   let m=Math.max(1,n);
@@ -1166,9 +1187,18 @@ function harvestRipe(p){ if(!p||S.status==='idle') return;
   const pv=S._harvPrev;
   if(S.position&&pv&&pv.px>0){ const dt=Date.now()-pv.at;
     if(dt>0&&dt<6000){ const adv=(S.position.side==='short'?(p-pv.px):(pv.px-p))/pv.px*100;
-      if(adv>=0.35){ cancelPendingAdds();
+      if(adv>=0.35){ cancelPendingAdds(); S._waveHoldUntil=Date.now()+60000;
         if(!S._advSpkAt||Date.now()-S._advSpkAt>60000){ S._advSpkAt=Date.now();
-          pushLog('server','⚡ انزلاق عكسي '+adv.toFixed(2)+'% خلال '+Math.round(dt/1000)+'ث — أُلغي التسليح حتى يهدأ السعر'); } } } }
+          pushLog('server','⚡ انزلاق عكسي '+adv.toFixed(2)+'% خلال '+Math.round(dt/1000)+'ث — سُحبت المستويات من المنصة 60ث حتى يهدأ السعر'); } } } }
+  // ——— درع الموجة المتدرجة ———
+  // موجة ثابتة ≥0.8% ضد المركز خلال 60ث لا تراها قفزة النبضة الواحدة: هكذا
+  // كُنست 9 مستويات دفعة واحدة في الحقيقي لأنها مركونة على المنصة. الرد:
+  // سحب فوري من المنصة (لا تعطيل محلي فقط) + تجميد إعادة التسليح 60ث تتمدد
+  // ما دامت الموجة مستمرة — «الاتباعد وقت الخطر» بشكله الصحيح للحقيقي
+  if(S.position&&S.status==='running'){ const wv=waveAdversePct();
+    if(wv>=0.8){ cancelPendingAdds(); S._waveHoldUntil=Date.now()+60000;
+      if(!S._wavePullAt||Date.now()-S._wavePullAt>60000){ S._wavePullAt=Date.now();
+        pushLog('server','🌊 موجة معاكسة '+wv.toFixed(2)+'% خلال 60ث — سُحبت المستويات من المنصة وتجميد التسليح حتى تستقر'); } } }
   S._harvPrev={px:p,at:Date.now()}; }
 function trailHuntAnchor(p){ if(!p||S.status!=='running') return;
   if(!S.huntAnchor){S.huntAnchor=p;return;}
@@ -1363,8 +1393,9 @@ function studying(){ return !!(S.studyUntil&&Date.now()<S.studyUntil); }
 function studyTick(){ if(!S.studyUntil) return;
   if(Date.now()>=S.studyUntil){
     // بعد كابح الكارثة: لا عودة لسوق متذبذب بعنف — مدّد الانتظار 60ث حتى يستقر
-    // (صدمة نظامية أو تقلب شريط حاد أو سيولة حيتان مضطربة) بسقف إجمالي 10 دقائق
-    if(S._postDisaster&&Date.now()-S._postDisaster<600000){
+    // (صدمة نظامية أو تقلب شريط حاد أو سيولة حيتان مضطربة) — بلا سقف زمني:
+    // ما دام التذبذب غير واضح الاتجاه وخطيرًا يبقى الانتظار ويُعاد الفحص كل 60ث
+    if(S._postDisaster){
       const vol=retStdev()||0, shocked=!!(S.regime&&S.regime.shock), whales=tapeFlow().whaleVol||0;
       if(shocked||vol>0.20||whales>0.6){ S.studyUntil=Date.now()+60000;
         if(!S._waitLogAt||Date.now()-S._waitLogAt>60000){ S._waitLogAt=Date.now();
@@ -1469,20 +1500,32 @@ function computeLiq(){ const dir=S.position?S.position.side:S.config.direction;
   // متبادل دائمًا). الحساب المعزول القديم (notional/lev فقط) كان يقرّب سعر
   // التصفية وهميًا فيُطلق «خطر تصفية» كاذب ويُغلق المركز بخسارة لا وجود لها
   const curNotional=(S.position?S.position.size*mult*(S.position.entry||entry):0)||notional;
+  // الدعم الحقيقي لمركز CROSS = رصيد الحساب الكلي (equity) لا «المتاح» اللحظي —
+  // الأوامر المركونة تحجز المتاح فيُقرأ ≈0 ويخرج سعر تصفية وهمي ملاصق للسعر
+  // فيُطلق «قرب التصفية» كاذب أقفل صفقات المالك بخسارة. equity ثابت لا يتأثر بالحجز
+  const eq=Math.max(0,S.exEquity||0);
   const backing=S.config.mode==='live'
-    ? curNotional/lev+Math.max(0,(S.exAvail||0)*0.95)
+    ? Math.max(curNotional/lev+Math.max(0,(S.exAvail||0)*0.95), eq*0.95)
     : Math.max(0,S.config.cycleBalance||0);
   const margin=backing+Math.max(0,S.position?S.position.unrealized||0:0);
+  // سلامة: سعر تصفية أقرب من نصف مدى الرافعة أو على الجهة الخاطئة من الدخول
+  // منحط لا شك فيه — يُرفض ولا يُبنى عليه «قرب تصفية». الحماية تبقى للكابح
+  // الـ$16 والحارس الخادمي على المنصة
+  const minD=0.5/lev;
   if(dir==='long'){ const den=q*mult*(1-mmr-liqFee); if(den<=0) return null;
-    const lp=(notional-margin)/den; return lp>0?lp:null; }
+    const lp=(notional-margin)/den;
+    return (lp>0&&lp<=entry*(1-minD))?lp:null; }
   const den=q*mult*(1+mmr+liqFee); if(den<=0) return null;
-  return (notional+margin)/den; }
+  const lp=(notional+margin)/den;
+  return lp>=entry*(1+minD)?lp:null; }
 function refreshLiq(){ const local=computeLiq();
   // تصفية المنصة قد ترجع منحطة (1e-10 لمراكز CROSS) — قيمة كهذه لا تُعرض ولا
   // يُبنى عليها حارس أو إنذار: المحسوب محليًا من الهامش والرافعة الحقيقية أصدق
   let ex=S.exLiqPrice||0; const e=S.position?S.position.entry:0;
   if(ex>0&&e>0&&S.position){ const sh=S.position.side==='short';
-    if(sh?ex>e*20:ex<e*0.05) ex=0; } // منحط لا شك فيه — تجاهله
+    // منحط لا شك فيه — تجاهله: بعيد عبثًا، أو على الجهة الخاطئة من الدخول أصلًا
+    // (تصفية الشورت فوق الدخول حتمًا واللونغ تحته — العكس قيمة مستحيلة تُكذّب الحارس)
+    if(sh?(ex>e*20||ex<=e*1.002):(ex<e*0.05||ex>=e*0.998)) ex=0; }
   if(ex>0&&!S.grid.some(g=>!g.reduceOnly&&g.status==='armed'&&!g.exchangeOrderId)){
     S.liqPrice=ex; }
   else S.liqPrice=local;
@@ -1507,10 +1550,15 @@ function reversalAgainst(p){ if(!S.position) return false;
   if(tA&&mA&&bA&&adv>=0.65) return true;
   if(tA&&mA&&adv>=1.4) return true;
   return false; }
-function cancelPendingAdds(){ for(const g of S.grid){
+function cancelPendingAdds(){ const live=S.config.mode==='live'&&S.keys;
+  for(const g of S.grid){
   if(g.lane==='comp') continue; // مستويات تعويض الجني الجزئي مقدسة — تبقى حتى يكتمل المركز
   if(!g.reduceOnly&&(g.status==='armed'||g.status==='open')&&!g.filledAt){
-    g.status='cancelled'; g.exchangeOrderId=null; } } }
+    g.status='cancelled';
+    // الحقيقي: الإلغاء على المنصة فورًا — الانتظار لدورة المزامنة (حتى 5ث) كان
+    // يترك الأمر حيًا يُكنس في الموجة نفسها التي سحبناه من أجلها
+    if(live&&g.exchangeOrderId){ const id=g.exchangeOrderId; g.exchangeOrderId=null; exCancelOne(id); }
+    else g.exchangeOrderId=null; } } }
 function circuitBreak(p){ if(!p||S.status!=='running') return;
   // حد الكارثة على مستوى الدورة كلها — قاعدة المالك نفسها: لا كابح قبل $16 (أو 8% من الرصيد)
   const limit=Math.max(LOSS_STOP_USD,(S.config.cycleBalance||0)*0.08);
@@ -1523,7 +1571,15 @@ function circuitBreak(p){ if(!p||S.status!=='running') return;
     notify('كابح الخسارة: أُغلق المركز عند حد الكارثة ويدرس الوضع قبل العودة','warn'); } }
 function escapeAdverse(p){ if(S.status!=='running'||!S.position||!p) return;
   const pos=S.position;
-  const danger=liqDanger(p), flip=reversalAgainst(p);
+  let danger=liqDanger(p); const flip=reversalAgainst(p);
+  // تأكيد المنصة قبل الإقفال الطارئ: سعر تصفية معلن من KuCoin سليم الجهة
+  // وبعيد عن السعر = الإنذار المحلي كاذب (قراءة وهمية أقفلت صفقات بخسارة) — لا إقفال
+  if(danger){ const exl=S.exLiqPrice||0, e0=pos.entry||0;
+    if(exl>0&&e0>0){ const sane=pos.side==='short'?exl>e0*1.005:exl<e0*0.995;
+      const nearEx=pos.side==='short'?p>=exl*0.985:p<=exl*1.015;
+      if(sane&&!nearEx){ danger=false;
+        if(!S._liqFalseAt||Date.now()-S._liqFalseAt>120000){ S._liqFalseAt=Date.now();
+          pushLog('server','إنذار تصفية محلي كاذب — المنصة تؤكد التصفية بعيدة عند '+fmtPx(exl)+' — لا إقفال'); } } } }
   const f=tapeFlow(), mom=S.confluence?S.confluence.momentum:0;
   const whaleRaw=f.whaleVol>0.28&&(
     (pos.side==='short'&&f.whale>0.5&&mom>0.08)||
@@ -1570,6 +1626,11 @@ function ensureGrid(){ if(S.status!=='running') return;
   const center=S.lastPrice||S.gridAnchor||(S.position?S.position.entry:0);
   if(!center) return;
   sanitizeAdds();
+  // تجميد إعادة التسليح أثناء موجة معاكسة: بلا هذا القفل كان السلم يُعاد بناؤه
+  // في النبضة التالية لسحب الدرع فيُلغى مفعول السحب وتُكنس المستويات من جديد.
+  // أمر الجني (reduceOnly) لا يُمس أبدًا — يبقى حيًا على المنصة طوال التجميد
+  if(S.position&&S._waveHoldUntil&&Date.now()<S._waveHoldUntil){
+    syncPositionTp(); return; }
   const dual=S.grid.some(g=>g.lane==='hold'&&(g.status==='armed'||g.status==='open'))&&
     S.grid.some(g=>g.lane==='trend'&&(g.status==='armed'||g.status==='open'));
   if(dual){ if(S.position) syncPositionTp(); return; }
@@ -1747,7 +1808,10 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
     // «insufficient available margin» عندما يكون الهامش محجوزًا كله بالأوامر
     if(!S._accAt||Date.now()-S._accAt>30000){ S._accAt=Date.now();
       kcPrivate('GET','/api/v1/account-overview?currency=USDT').then(a=>{
-        const av=Number(a&&a.availableBalance); if(av>=0&&isFinite(av)) S.exAvail=av; }).catch(()=>{}); }
+        const av=Number(a&&a.availableBalance); if(av>=0&&isFinite(av)) S.exAvail=av;
+        // رصيد الحساب الكلي (equity) — المرجع الثابت لحساب التصفية وميزانية
+        // الأحجام، لا ينهار لحظيًا بحجز الأوامر المركونة كما يفعل «المتاح»
+        const eq=Number(a&&a.accountEquity); if(eq>0&&isFinite(eq)) S.exEquity=eq; }).catch(()=>{}); }
     // الرافعة ثابتة كما ضبطها المالك تمامًا — لا تكيّف ولا تحذير:
     // في وضع CROSS تُتجاهل رافعة الأمر وتُطبَّق رافعة الرمز، لذا تُفرض على المنصة
     // عبر نقطة KuCoin الرسمية (مخنوقة 5 دقائق، صامتة إن رُفضت أثناء مركز مفتوح)
@@ -1826,6 +1890,13 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
     const liveIds=new Set(S.grid.filter(l=>l.exchangeOrderId).map(l=>l.exchangeOrderId));
     for(const o of exs){ if(!liveIds.has(o.orderId)){
       try{ await kcPrivate('DELETE','/api/v1/orders/'+o.orderId); }catch(e){} } }
+    // كنس الستوبات اليتيمة (مخنوق 30ث): أوامر الوقف تعيش في قائمة منفصلة لا يطالها
+    // كنس الأوامر العادية أعلاه — احتفظ بالحارس الحالي فقط واحذف ما عداه. فشل
+    // القراءة (null) يعني تخطي الجولة بلا حذف أعمى
+    if(!S._stopSweepAt||Date.now()-S._stopSweepAt>30000){ S._stopSweepAt=Date.now();
+      const stops=await exStops(sym);
+      if(stops) for(const st of stops){ if(st.id&&st.id!==S._guardId){
+        try{ await kcPrivate('DELETE','/api/v1/stopOrders/'+st.id); }catch(e){} } } }
   }catch(e){ const m=e.message||String(e);
     // نفس الخطأ مرة كل دقيقة — السطر الواحد كل 5 ثوانٍ كان يغرق السجل ويطلق تنبيهات مجنونة
     if(m!==_syncErrMsg||Date.now()-_syncErrAt>60000){ _syncErrAt=Date.now(); _syncErrMsg=m;
