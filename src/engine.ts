@@ -808,6 +808,11 @@ function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
   let span=Math.max(spanMin,0.02);
   if(liq>0&&!wide){ const room=c.direction==='short'?liq*0.985/from-1:1-liq*1.015/from;
     if(room>step*0.5) span=Math.max(spanMin,room); }
+  // سقف الامتداد: السلم للمتوسطات ضمن تصحيح حقيقي، لا للوصول قرب التصفية —
+  // liq المنفجر (×4 الدخول لحظة التسليح لأن pend يحسب open فقط) مدّ السلم إلى
+  // +260% فوُلدت مستويات زومبي ضخمة ترفضها المنصة (insufficient margin كل دقيقة)
+  const reach=Math.max(spanMin,Math.min(step*n*2,0.12));
+  if(span>reach) span=reach;
   for(let i=1;i<=n;i++){
     // الشبكة الواسعة أيضًا لها سقف (5%) — الامتداد المفتوح كان يسلّح مستويات على بعد 30%
     const dist=wide?Math.min(step*i,0.05):span*Math.pow(i/n,1.5);
@@ -837,6 +842,16 @@ function sanitizeAdds(){ const cap=effLevels();
       if(!side||gs===side){ g.status='cancelled'; g.exchangeOrderId=null; } }
     return; }
   const st=addStepPct(),px=S.lastPrice||0;
+  // كنّاس الزومبي: مستوى أبعد من مدى السلم المسموح (×1.25 هيستيريسيس) لا يمكن
+  // أن يُملأ قبل كابح الـ$16 أصلًا — وجوده يحجز هامشًا ويغرق السجل برفض المنصة.
+  // يمسح مخلّفات الامتداد المنفجر من المخزن عند أول تشغيل لهذه النسخة
+  if(px>0){ const nz=effLevels(), stf=st/100;
+    const reach=Math.max(stf*nz*0.9,Math.min(stf*nz*2,0.12))*1.25;
+    for(const g of S.grid){ if(g.reduceOnly||g.filledAt||g.lane) continue;
+      if(g.status!=='armed'&&g.status!=='open') continue;
+      if(Math.abs((g.price||0)-px)/px>reach){ g.status='cancelled';
+        if(S.config.mode==='live'&&S.keys&&g.exchangeOrderId){ const id=g.exchangeOrderId; g.exchangeOrderId=null; exCancelOne(id); }
+        else g.exchangeOrderId=null; } } }
   for(const side of ['buy','sell']){
     const live=S.grid.filter(g=>!g.reduceOnly&&g.side===side&&(g.status==='armed'||g.status==='open'))
       .sort((a,b)=>Math.abs((b.price||0)-px)-Math.abs((a.price||0)-px));
