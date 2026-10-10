@@ -60,6 +60,14 @@ const srv = createServer(async (req, res) => {
           return send(res, 200, { ok: !!ok, error: ok ? null : 'فشل الاتصال بالمنصة — تحقق من المفاتيح' });
         }
         case 'clearKeys': clearKeys(); return send(res, 200, { ok: true });
+        // إيقاف نهائي من الواجهة: إيقاف مؤكد للمراكز ثم خروج نظيف (رمز 0) —
+        // سكربت التشغيل يكسر حلقة إعادة التشغيل عند الخروج النظيف فيبقى متوقفًا
+        case 'shutdown': {
+          send(res, 200, { ok: true });
+          try { await stopBot(); } catch (e) {}
+          setTimeout(() => process.exit(0), 600);
+          return;
+        }
         case 'scanRadar': await scanRadar(); return send(res, 200, { ok: true, radar: S.radar || null });
         default: return send(res, 400, { ok: false, error: 'إجراء غير معروف: ' + a });
       }

@@ -24,6 +24,10 @@ function tpBase(){ return Math.max(0.03,Number(S&&S.config&&S.config.tpNet)||TP_
 /* ---------- أدوات ---------- */
 const clamp=(v,a,b)=>Math.min(b,Math.max(a,v));
 const uid=p=>p+'_'+Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-4);
+// بصمة العقل الواحد: كل نسخة محرك (تطبيق أو سيرفر) تختم كل clientOid بها.
+// أمر على المنصة ببصمة tq غير بصمتي = عقل ثانٍ يتداول على الحساب فيُحجب
+// التسليح فورًا بدل حرب إلغاء/إعادة وضع كانت تفسر كل «الكوارث غير المفهومة»
+function myOid(p){ return 'tq'+(S.instId||'zz')+p+Math.random().toString(36).slice(2,10); }
 const fmtPx=n=>{ n=Number(n); if(!n||!isFinite(n)||n<=0) return '—';
   if(n>=1000) return n.toLocaleString('en-US',{maximumFractionDigits:2});
   if(n>=1) return n.toFixed(2);
@@ -177,13 +181,19 @@ export async function remoteSync(){ const base=R(); if(!base) return false;
   }catch(e){ _remoteFails++; streamState.connected=false;
     if(_remoteFails===5) toast('⚠️ سيرفر Termux لا يرد — شغّله من جديد: node trq-server.mjs');
     emit(); return false; } }
-// جسّ نبض السيرفر قبل إقلاع المحرك — 900 مللي ثانية كحد أقصى فلا يتأخر فتح التطبيق
+// جسّ نبض السيرفر قبل إقلاع المحرك — محاولتان بمهلة 2.5 ثانية: المهلة القديمة
+// (900 مللي) كانت تفشل أحيانًا على جوال مشغول فيقلع التطبيق كعقل محلي موازٍ
+// والسيرفر يعمل — عقلان على حساب واحد = أصل كل الكوارث اللاحقة
 export async function detectRemoteServer(){ if(typeof window==='undefined') return false;
-  try{ const c=new AbortController(); const t=setTimeout(()=>c.abort(),900);
-    const r=await fetch('http://127.0.0.1:8787/state',{signal:c.signal}); clearTimeout(t);
-    const j=await r.json();
-    if(j&&j.ok){ window.__TRQ_REMOTE='http://127.0.0.1:8787'; return true; }
-  }catch(e){}
+  for(let a=0;a<2;a++){
+    try{ const c=new AbortController(); const t=setTimeout(()=>c.abort(),2500);
+      const r=await fetch('http://127.0.0.1:8787/state',{signal:c.signal}); clearTimeout(t);
+      const j=await r.json();
+      if(j&&j.ok){ window.__TRQ_REMOTE='http://127.0.0.1:8787';
+        S.serverPaired=true; try{ localStorage.setItem('trq:paired','1'); }catch(e){}
+        return true; }
+    }catch(e){}
+    if(a===0) await new Promise(r=>setTimeout(r,600)); }
   return false; }
 
 /* ---------- الحالة ---------- */
@@ -205,6 +215,8 @@ export const S = {
   studyUntil:0, studyAcc:null, // دراسة العملة الجديدة قبل أي دخول
   ignoreExchangeUntil:0, lastTickAt:null, sound:true, soundTone:'soft', permDenied:false,
   toastMsg:null, _metaAt:0, _lastTrailAt:0,
+  instId:null, serverPaired:false, mirrorLock:false, // بروتوكول العقل الواحد
+  foreignBrain:false, _foreignStrikes:0, _untaggedRun:0, // كاشف العقل الأجنبي
   memory:{pairs:{},cycles:0,totalPnl:0}, // الذاكرة القوية — تبقى عبر الدورات ولا تُمسح أبدًا
 };
 
@@ -214,6 +226,8 @@ function saveAll(){ try{
   localStorage.setItem('trq:keys',S.keys?JSON.stringify(S.keys):'');
   localStorage.setItem('trq:snd',S.sound?'1':'0');
   localStorage.setItem('trq:tone',S.soundTone||'soft');
+  if(S.instId) localStorage.setItem('trq:inst',S.instId);
+  localStorage.setItem('trq:paired',S.serverPaired?'1':'0');
   const rt={grid:S.grid,position:S.position,journal:S.journal,realizedPnl:S.realizedPnl,
     feesPaid:S.feesPaid,cycleHarvested:S.cycleHarvested||0,priceTrail:S.priceTrail,cvd:S.cvd,huntCount:S.huntCount,
     lastPrice:S.lastPrice,markPrice:S.markPrice,activeCycle:S.activeCycle,status:S.status,
@@ -226,6 +240,10 @@ function loadAll(){ try{
   const ks=localStorage.getItem('trq:keys'); if(ks){ try{S.keys=JSON.parse(ks);}catch(e){S.keys=null;} }
   S.sound=localStorage.getItem('trq:snd')!=='0';
   S.soundTone=localStorage.getItem('trq:tone')||'soft';
+  // بصمة هذا العقل: تُولد مرة وتبقى للأبد — بها تُميَّز أوامري عن أوامر أي عقل آخر
+  S.instId=localStorage.getItem('trq:inst')||'';
+  if(!S.instId){ S.instId=Math.random().toString(36).slice(2,8); localStorage.setItem('trq:inst',S.instId); }
+  S.serverPaired=localStorage.getItem('trq:paired')==='1';
   const rt=JSON.parse(localStorage.getItem('trq:rt')||'null');
   if(rt){ Object.assign(S,{grid:rt.grid||[],position:rt.position||null,journal:rt.journal||[],
     realizedPnl:rt.realizedPnl||0,feesPaid:rt.feesPaid||0,cycleHarvested:rt.cycleHarvested||0,priceTrail:rt.priceTrail||[],
@@ -540,7 +558,7 @@ async function exPlaceLimit(intent){
 }
 async function exPlaceMarket(symbol,side,qty){
   await ensureLiveMeta(symbol);
-  return placeOrderSmart({clientOid:'hunt_'+Date.now().toString(36),
+  return placeOrderSmart({clientOid:myOid('h'),
     symbol,side,type:'market',size:qty,leverage:Number(S.config.leverage)||1,marginMode:'CROSS'});
 }
 const exCancelAll = symbol => kcPrivate('DELETE','/api/v1/orders?symbol='+encodeURIComponent(symbol)).catch(()=>{});
@@ -552,10 +570,10 @@ const exCancelStopOne = id => kcPrivate('DELETE','/api/v1/stopOrders/'+id).catch
 // عبر placeOrderSmart: وضع الهامش يُطابَق مع وضع المركز الفعلي تلقائيًا —
 // الرفض «margin mode does not match» كان يترك المراكز مفتوحة بلا رقيب
 function exCloseQty(symbol,side,qty){
-  return placeOrderSmart({clientOid:'cls_'+Date.now().toString(36)+Math.floor(Math.random()*1000),
+  return placeOrderSmart({clientOid:myOid('k'),
     symbol,type:'market',side:side==='short'?'buy':'sell',size:qty,reduceOnly:true,marginMode:'CROSS'}); }
 function exClose(symbol,side){
-  return placeOrderSmart({clientOid:'cls_'+Date.now().toString(36),
+  return placeOrderSmart({clientOid:myOid('z'),
     symbol,type:'market',side:side==='short'?'buy':'sell',closeOrder:true,reduceOnly:true,marginMode:'CROSS'});
 }
 async function exPing(){
@@ -592,7 +610,7 @@ async function exPlaceStopGuard(){ if(S.config.mode!=='live'||!S.keys||!S.positi
     await exCancelStops(S.config.symbol); S._guardId=null;
     // عبر placeOrderSmart: الحارس كان يُرسَل بلا marginMode فيُرفض تمامًا —
     // آخر خط دفاع كان معطّلًا عمليًا عند أي مركز CROSS
-    const r=await placeOrderSmart({clientOid:'grd_'+Date.now().toString(36),
+    const r=await placeOrderSmart({clientOid:myOid('g'),
       symbol:S.config.symbol,type:'market',side:sh?'buy':'sell',
       stop:sh?'up':'down',stopPrice:String(gp),stopPriceType:'MP',
       reduceOnly:true,closeOrder:true,marginMode:'CROSS'});
@@ -843,7 +861,7 @@ function buildGrid(center,wide){ const c=S.config,tick=S.tickSize||1e-10;
     // حجم المستوى يتبع ترتيبه الحقيقي في السلم (بعد المناطق المملوءة)
     const qi=Math.min(filledN+i-1,qtys.length-1);
     const qty=qtys.length?qtys[Math.max(0,qi)]:contractsForLevel(center);
-    grid.push({id:uid('lvl'),clientOid:uid('oid'),
+    grid.push({id:uid('lvl'),clientOid:myOid('o'),
       side:c.direction==='short'?'sell':'buy',price,qty,status:'armed',
       reduceOnly:false,exchangeOrderId:null,filledAt:null,origin:'grid',createdAt:Date.now()});
   }
@@ -972,7 +990,7 @@ function armCompEntry(qty){ const pos=S.position; if(!pos||!(qty>0)) return;
   // لا تكديس: مستوى تعويض قائم قرب النقطة نفسها يكفي
   if(S.grid.some(g=>!g.reduceOnly&&(g.status==='armed'||g.status==='open')&&
     g.side===side&&Math.abs(g.price-px)<=tol)) return;
-  S.grid.push({id:uid('cmp'),clientOid:uid('oid'),side,price:px,qty:q,
+  S.grid.push({id:uid('cmp'),clientOid:myOid('o'),side,price:px,qty:q,
     status:'armed',reduceOnly:false,exchangeOrderId:null,filledAt:null,
     origin:'comp',lane:'comp',createdAt:Date.now()});
   S.grid.sort((a,b)=>b.price-a.price);
@@ -1056,7 +1074,7 @@ function syncPositionTp(){ if(S.status!=='running'||!S.position) return;
   if(match){ for(const g of liveTp){ if(g!==match){ g.status='cancelled'; g.exchangeOrderId=null; } }
     return; }
   for(const g of liveTp){ g.status='cancelled'; g.exchangeOrderId=null; }
-  S.grid.push({id:uid('tp'),clientOid:uid('oid'),side:pos.side==='short'?'buy':'sell',
+  S.grid.push({id:uid('tp'),clientOid:myOid('o'),side:pos.side==='short'?'buy':'sell',
     price:want,qty:pos.size,status:'armed',reduceOnly:true,exchangeOrderId:null,
     filledAt:null,origin:'grid',createdAt:Date.now(),
     lotId:S.journal.find(j=>j.status==='open')?.id});
@@ -1511,7 +1529,7 @@ function maybeHunt(p){ const hit=huntTrigger(p); if(!hit) return false;
     noteClose(d.closedQty,p,fee,'صفقة',d.realized-of-fee); S.huntOpen=Math.max(0,(S.huntOpen||0)-1); }
   if(d.addedQty>0){ S.huntCount++; S.huntOpen=(S.huntOpen||0)+1;
     const lotId=noteEntry(d.addedQty,p,fee,'hunt');
-    S.grid.push({id:uid('hunt'),clientOid:uid('oid'),side:hit.side,price:p,qty:d.addedQty,
+    S.grid.push({id:uid('hunt'),clientOid:myOid('o'),side:hit.side,price:p,qty:d.addedQty,
       status:'filled',reduceOnly:false,exchangeOrderId:null,filledAt:Date.now(),
       origin:'hunt',createdAt:Date.now(),lotId});
     notify('صفقة فردية #'+S.huntCount+' — '+(hit.side==='sell'?'بيع':'شراء')+' @ '+fmtPx(p)+
@@ -1909,14 +1927,14 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
     for(const o of exs){ if(S.grid.some(l=>l.exchangeOrderId===o.orderId||
       (o.clientOid&&l.clientOid===o.clientOid))) continue;
       if(hasLocalLive) continue;
-      S.grid.push({id:uid('ex'),clientOid:o.clientOid||uid('oid'),side:o.side,
+      S.grid.push({id:uid('ex'),clientOid:o.clientOid||myOid('x'),side:o.side,
         price:o.price,qty:o.size,status:'open',reduceOnly:o.reduceOnly,
         exchangeOrderId:o.orderId,filledAt:null,origin:'grid'}); }
     const want=S.grid.filter(l=>(l.status==='armed'));
-    if(!S.permDenied) for(const l of want){ if(l.exchangeOrderId) continue;
-      // معرّف جديد لكل محاولة وضع: المنصة تحفظ clientOid الملغى مدة فترفض
-      // «القيمة موجودة بالفعل» ويتعطل تسليح المستوى (لوحظ في الحقيقي 13:38)
-      l.clientOid=uid('oid');
+    if(!S.permDenied&&!S.foreignBrain) for(const l of want){ if(l.exchangeOrderId) continue;
+      // معرّف جديد مختوم بالبصمة لكل محاولة وضع: المنصة تحفظ clientOid الملغى
+      // مدة فترفض «القيمة موجودة بالفعل» ويتعطل تسليح المستوى (لوحظ في الحقيقي)
+      l.clientOid=myOid('r');
       try{ const r=await exPlaceLimit({clientOid:l.clientOid,symbol:sym,side:l.side,
         price:l.price,qty:l.qty,reduceOnly:l.reduceOnly,leverage:S.config.leverage});
         l.status='open'; l.exchangeOrderId=r.orderId;
@@ -1927,13 +1945,34 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
         // كبح تكرار نفس الخطأ — مرة كل دقيقة كافية (لا window هنا — السيرفر Node)
         if(Date.now()-_ordErrAt>60000){ _ordErrAt=Date.now();
           pushLog('error','أمر '+l.side+' @ '+fmtPx(l.price)+': '+m); } } }
+    // كنس اليتيمة + كاشف العقل الأجنبي: أوامر لا تعرفها شبكتي — ببصمتي = يتيمة
+    // تُلغى كالعادة · ببصمة tq أخرى = عقل ثانٍ حي على الحساب (سيرفر قديم أو
+    // نسخة تطبيق موازية) فلا تُلغى (سيُعيدها فتندلع حرب أوامر — أصل كوارث
+    // المالك) بل يُحجب التسليح هنا ويُنذر بوضوح · بلا بصمة = قديمة تُلغى،
+    // وإن عادت بالظهور جولات متتالية فمصدرها عقل قديم بلا بصمة — نفس الحجب
     const liveIds=new Set(S.grid.filter(l=>l.exchangeOrderId).map(l=>l.exchangeOrderId));
-    for(const o of exs){ if(!liveIds.has(o.orderId)){
-      try{ await kcPrivate('DELETE','/api/v1/orders/'+o.orderId); }catch(e){} } }
+    const myTag='tq'+(S.instId||'zz');
+    let foreign=false, untagged=0;
+    for(const o of exs){ if(liveIds.has(o.orderId)) continue;
+      const tg=String(o.clientOid||'');
+      if(tg.startsWith(myTag)){ try{ await kcPrivate('DELETE','/api/v1/orders/'+o.orderId); }catch(e){} }
+      else if(tg.startsWith('tq')) foreign=true;
+      else { untagged++; try{ await kcPrivate('DELETE','/api/v1/orders/'+o.orderId); }catch(e){} } }
+    if(foreign) S._foreignStrikes=Math.min(9,(S._foreignStrikes||0)+2);
+    else if(untagged>0){ S._untaggedRun=(S._untaggedRun||0)+1;
+      if(S._untaggedRun>=3) S._foreignStrikes=Math.min(9,(S._foreignStrikes||0)+1); }
+    else { S._untaggedRun=0; S._foreignStrikes=Math.max(0,(S._foreignStrikes||0)-1); }
+    const wasFB=!!S.foreignBrain;
+    S.foreignBrain=(S._foreignStrikes||0)>=4;
+    if(S.foreignBrain&&!wasFB){
+      pushLog('error','⛔ عقل آخر للبوت يتداول على نفس الحساب (سيرفر Termux قديم لم يُحدَّث أو نسخة ثانية) — حُجب التسليح هنا حتى لا تتقاتل النسختان. الحل: في Termux اضغط Ctrl+C ثم نفّذ: pkill -f trq-server.mjs وبعدها أمر التثبيت من جديد');
+      notify('تحذير خطير: عقلان للبوت على حساب واحد — أوقف سيرفر Termux القديم فورًا','warn'); }
+    if(!S.foreignBrain&&wasFB) pushLog('server','زال العقل الأجنبي عن الحساب — عاد التسليح طبيعيًا ✓');
     // كنس الستوبات اليتيمة (مخنوق 30ث): أوامر الوقف تعيش في قائمة منفصلة لا يطالها
     // كنس الأوامر العادية أعلاه — احتفظ بالحارس الحالي فقط واحذف ما عداه. فشل
-    // القراءة (null) يعني تخطي الجولة بلا حذف أعمى
-    if(!S._stopSweepAt||Date.now()-S._stopSweepAt>30000){ S._stopSweepAt=Date.now();
+    // القراءة (null) يعني تخطي الجولة بلا حذف أعمى. ومع عقل أجنبي على الحساب
+    // لا يُمس شيء — ستوباته قد تحمي مركزًا حقيقيًا لا نراه
+    if(!S.foreignBrain&&(!S._stopSweepAt||Date.now()-S._stopSweepAt>30000)){ S._stopSweepAt=Date.now();
       const stops=await exStops(sym);
       if(stops) for(const st of stops){ if(st.id&&st.id!==S._guardId){
         try{ await kcPrivate('DELETE','/api/v1/stopOrders/'+st.id); }catch(e){} } } }
@@ -2032,7 +2071,8 @@ async function botTick(){
 }
 
 /* ---------- أوامر التشغيل ---------- */
-export function startBot(){ if(R()){ remoteCmd('start').then(()=>remoteSync()); return; }
+export function startBot(){ if(R()){ remoteCmd('start').then(r=>{ if(!r||r.ok!==true){ toast('⚠️ أمر التشغيل لم يصل السيرفر — تحقق أن Termux يعمل'); } remoteSync(); }); return; }
+  if(S.mirrorLock){ toast('⛔ سيرفر Termux المُقترن لا يرد — التشغيل المحلي محجوب حتى لا يعمل عقلان على الحساب. شغّل السيرفر أو «انسَه» من الإعدادات'); return; }
   if(S.status==='running') return;
   if(S.config.mode==='live'&&!S.keys){ toast('اربط مفاتيح KuCoin أولاً من الإعدادات'); return; }
   const p=S.lastPrice||S.markPrice;
@@ -2052,7 +2092,8 @@ export function startBot(){ if(R()){ remoteCmd('start').then(()=>remoteSync()); 
     ' (تركيز يناسب رأس المال) والصيد يعمل');
   nativeNotify('TRQ يعمل ✓','البوت متصل بـ KuCoin ويتداول '+(S.config.displaySymbol||S.config.symbol)+' — يستمر حتى في الخلفية',true);
   toast('البوت يعمل الآن'); emit(); saveAll(); }
-export function pauseBot(){ if(R()){ remoteCmd('pause').then(()=>remoteSync()); return; }
+export function pauseBot(){ if(R()){ remoteCmd('pause').then(r=>{ if(!r||r.ok!==true){ toast('⚠️ أمر الإيقاف المؤقت لم يصل السيرفر — تحقق أن Termux يعمل'); } remoteSync(); }); return; }
+  if(S.mirrorLock){ toast('⛔ التحكم معطل — السيرفر المُقترن لا يرد'); return; }
   if(S.status!=='running') return;
   S.status='paused';
   for(const l of S.grid){ if(!l.reduceOnly&&(l.status==='open'||l.status==='armed')){
@@ -2062,7 +2103,11 @@ export function pauseBot(){ if(R()){ remoteCmd('pause').then(()=>remoteSync()); 
   if(S.config.mode==='live'&&S.keys) exCancelAll(S.config.symbol).catch(()=>{});
   pushLog('info','إيقاف مؤقت — لا صفقات جديدة، الجني مستمر');
   emit(); saveAll(); }
-export async function stopBot(){ if(R()){ await remoteCmd('stop'); await remoteSync(); return; }
+export async function stopBot(){ if(R()){ const r=await remoteCmd('stop');
+    if(!r||r.ok!==true){ toast('⚠️ الإيقاف لم يصل السيرفر — البوت لا يزال يعمل في Termux! أوقفه من هناك أو بزر «إيقاف السيرفر نهائيًا»');
+      pushLog('error','أمر الإيقاف لم يصل السيرفر — التداول مستمر في Termux'); }
+    await remoteSync(); return; }
+  if(S.mirrorLock){ toast('⛔ الإيقاف هنا لا يوقف شيئًا — السيرفر المُقترن هو من يتداول وهو لا يرد. أوقفه من Termux'); return; }
   if(S.status==='idle') return;
   const p=S.lastPrice||S.markPrice||0, prevSide=S.position?S.position.side:null;
   if(S.config.mode==='live'&&S.keys&&prevSide){
@@ -2082,14 +2127,20 @@ export async function stopBot(){ if(R()){ await remoteCmd('stop'); await remoteS
   clearNativeOngoing();
   pushLog('info','إيقاف — أُغلقت كل الصفقات عند السعر الحالي');
   toast('تم إيقاف البوت'); emit(); saveAll(); }
-export function newCycle(){ if(R()){ remoteCmd('newCycle').then(()=>remoteSync()); return; } // الرصيد يحمل الأرباح المجناة أصلًا (تُضاف لحظة الجني) — لا جمع مزدوج
+export function newCycle(){ if(R()){ remoteCmd('newCycle').then(r=>{ if(!r||r.ok!==true){ toast('⚠️ أمر الدورة لم يصل السيرفر — تحقق أن Termux يعمل'); } remoteSync(); }); return; } // الرصيد يحمل الأرباح المجناة أصلًا (تُضاف لحظة الجني) — لا جمع مزدوج
+  if(S.mirrorLock){ toast('⛔ التحكم معطل — السيرفر المُقترن لا يرد. شغّله من Termux أولًا'); return; }
   const rolled=Math.max(0.01,Math.round(S.config.cycleBalance*100)/100);
   const keep=S.status==='running'||S.status==='paused';
-  if(S.config.mode==='live'&&S.keys){ exCancelAll(S.config.symbol).catch(()=>{});
-    exCancelStops(S.config.symbol).catch(()=>{}); S._guardId=null;
-    // لا تيتيم لمراكز حقيقية: دورة جديدة بمركز مفتوح تُغلقه على المنصة أولًا
-    if(S.position) exCloseQty(S.config.symbol,S.position.side,S.position.size)
-      .catch(e=>pushLog('error','إغلاق مركز الدورة السابقة فشل: '+(e.message||e))); }
+  if(S.config.mode==='live'&&S.keys){ const symNc=S.config.symbol;
+    // إغلاق مؤكد لا إرسال ونسيان: أعد المحاولة حتى يتسطح المركز فعلًا —
+    // الإرسال الأعمى كان يترك مركز الدورة مفتوحًا على المنصة بلا رقيب
+    (async()=>{ try{ await exCancelAll(symNc); await exCancelStops(symNc); }catch(e){}
+      S._guardId=null;
+      try{ let pos=await exPosition(symNc);
+        for(let i=0;i<4&&pos;i++){ try{ await exCloseQty(symNc,pos.side,pos.size); }catch(e){}
+          await new Promise(r=>setTimeout(r,700)); pos=await exPosition(symNc).catch(()=>null); }
+        if(pos) pushLog('error','⚠️ إغلاق مركز الدورة السابقة لم يتأكد بعد 4 محاولات — راجع KuCoin يدويًا فورًا');
+      }catch(e){ pushLog('error','إغلاق مركز الدورة السابقة فشل: '+(e.message||e)); } })(); }
   // نافذة تجاهل 12 ثانية: لا تستعد المركز المغلق للتو كـ«شبح» قبل أن تسوّيه المنصة
   S.ignoreExchangeUntil=Date.now()+12000;
   // قبل المسح: تُحسب حصيلة الدورة الجديدة
@@ -2120,10 +2171,37 @@ export async function saveKeys(k){
     toast('حُفظت المفاتيح لكن فشل الاتصال: '+(e.message||e)); }
   emit(); return S.linkOk;
 }
-export function clearKeys(){ if(R()){ remoteCmd('clearKeys').then(()=>remoteSync()); return; }
-  S.keys=null; S.linkOk=false; S.exEquity=null; saveAll(); emit(); toast('حُذفت المفاتيح'); }
+export function clearKeys(){ if(R()){ remoteCmd('clearKeys').then(r=>{ if(!r||r.ok!==true){ toast('⚠️ أمر حذف المفتاح لم يصل السيرفر — السيرفر لا يزال يتداول! نفّذ الحذف من Termux مباشرة'); } remoteSync(); }); return; }
+  if(S.mirrorLock){ toast('⛔ سيرفر Termux المُقترن يتداول بمفاتيحه الخاصة — حذف المفتاح هنا لا يوقفه! شغّل السيرفر واحذف من التطبيق وهو متصل، أو أوقف السيرفر نهائيًا من الإعدادات'); return; }
+  // حذف المفتاح = انسحاب كامل من المنصة أولًا: الحذف المباشر القديم كان يترك
+  // الأوامر والمراكز يتيمة على الحساب للأبد بلا أي وسيلة تحكم بعد ضياع المفتاح
+  const had=!!S.keys, sym=S.config.symbol, live=S.config.mode==='live';
+  S.status='stopped'; // أوقف المحرك فورًا حتى لا يوضع أي أمر أثناء الانسحاب
+  for(const g of S.grid){ if(g.status==='armed'||g.status==='open'){ g.status='cancelled'; g.exchangeOrderId=null; } }
+  if(live){ S.position=null; S._tpBanked=0; S._guardId=null; S.ignoreExchangeUntil=Date.now()+15000; }
+  if(had){ (async()=>{ try{ await exCancelAll(sym); await exCancelStops(sym); }catch(e){}
+    if(live){ try{ let pos=await exPosition(sym);
+      if(pos){ for(let i=0;i<4&&pos;i++){ try{ await exCloseQty(sym,pos.side,pos.size); }catch(e){}
+          await new Promise(r=>setTimeout(r,700)); pos=await exPosition(sym).catch(()=>null); }
+        if(!pos) notify('انسحاب كامل ✓: أُلغيت الأوامر وأُغلق المركز قبل حذف المفتاح','warn');
+        else pushLog('error','⚠️ إغلاق المركز قبل حذف المفتاح لم يتأكد — راجع KuCoin يدويًا فورًا'); } }catch(e){} }
+    pushLog('server','حذف المفتاح: أُلغيت كل الأوامر'+(live?' وأُغلق أي مركز قائم':'')+' — انسحاب كامل من المنصة');
+    S.keys=null; S.linkOk=false; S.exEquity=null; saveAll(); emit(); })(); }
+  toast('حُذفت المفاتيح — انسحاب كامل من المنصة'); emit(); }
+// إيقاف السيرفر نهائيًا من الواجهة: يُغلق كل شيء بإيقاف مؤكد ثم تُنهى العملية —
+// سكربت التشغيل يكسر حلقته عند الخروج النظيف فيبقى متوقفًا حتى يشغّله المالك
+export async function shutdownServer(){ if(!R()){ toast('لا سيرفر متصل'); return false; }
+  const r=await remoteCmd('shutdown');
+  if(!r||r.ok!==true){ toast('⚠️ لم يصل أمر إيقاف السيرفر'); return false; }
+  toast('أُرسل إيقاف السيرفر النهائي ✓'); return true; }
+// نسيان الاقتران: يفك قفل المرآة ويعيد التطبيق عقلًا مستقلًا (لمن لا يريد Termux)
+export function unpairServer(){ S.serverPaired=false; S.mirrorLock=false;
+  try{ localStorage.setItem('trq:paired','0'); }catch(e){}
+  pushLog('server','نُسي سيرفر Termux — التطبيق الآن عقل مستقل');
+  toast('نُسي السيرفر — التطبيق الآن يعمل مستقلًا'); emit(); saveAll(); }
 export function saveCfg(v){
-  if(R()){ remoteCmd('saveCfg',{cfg:v}).then(()=>remoteSync()); return; }
+  if(R()){ remoteCmd('saveCfg',{cfg:v}).then(r=>{ if(!r||r.ok!==true){ toast('⚠️ الإعدادات لم تصل السيرفر — لم تُطبَّق'); } remoteSync(); }); return; }
+  if(S.mirrorLock){ toast('⛔ الإعدادات تُدار من السيرفر المُقترن — شغّله أولًا أو «انسَه»'); return; }
   const old=S.config.symbol;
   const oldLv=S.config.leverage, oldN=S.config.levels,
     oldStep=S.config.gridStepPct, oldBal=S.config.cycleBalance;
@@ -2235,12 +2313,24 @@ export function initEngine(){
   loadAll();
   if(S.config.symbol==='BTCUSDTM') S.config.symbol='XBTUSDTM'; // الرمز الصحيح في عقود KuCoin
   S.config.displaySymbol=S.config.symbol.replace(/USDTM$/i,'').replace(/^XBT$/i,'BTC');
+  // قفل المرآة: هذا الجهاز اقترن بسيرفر Termux سابقًا لكنه لا يصله الآن.
+  // إقلاع عقل محلي هنا هو ما صنع «الورقي يتداول حقيقيًا» و«الإيقاف لا يوقف»
+  // و«حذف المفتاح لا يفعل شيئًا»: أوامر الواجهة تذهب لحالة محلية صورية
+  // والسيرفر يواصل التداول بمفاتيحه المحفوظة. القاعدة الحديدية: بعد الاقتران
+  // لا عقل محلي أبدًا — التطبيق واجهة فقط حتى يعود السيرفر أو يُنسى من الإعدادات
+  if(S.serverPaired){ S.mirrorLock=true;
+    if(S.status==='running'||S.status==='paused') S.status='stopped';
+    pushLog('error','⛔ سيرفر Termux المُقترن لا يرد — حُجب التشغيل المحلي حتى لا يعمل عقلان على الحساب. شغّل السيرفر وسيتحول التطبيق واجهة تلقائيًا، أو «انسَ السيرفر» من الإعدادات للعمل بدونه');
+    toast('⚠️ سيرفر Termux لا يرد — شغّله من Termux ليعمل البوت');
+    // جسّ النبض كل 20 ثانية: عاد السيرفر = إعادة تحميل فورية لوضع المرآة
+    if(typeof window!=='undefined') setInterval(async()=>{ try{
+      if(await detectRemoteServer()) location.reload(); }catch(e){} },20000); }
   pushLog('info','TRQ Trading جاهز — '+(S.config.mode==='live'?'وضع LIVE':'وضع ورقي'));
   kcTimeSync(); // ضبط انحراف ساعة الجهاز عن المنصة قبل أي طلب موقّع
   // إقلاع في وضع ورقي بمفاتيح محفوظة: أي أوامر/مركز على المنصة مخلّفات جلسة
   // حقيقية سابقة بلا رقيب (السبب الفعلي لصفقة المالك المعلقة فجرًا) — تُؤمَّن
   // فورًا: إلغاء الكل وإغلاق أي مركز متبقٍ. الورقي = صفر انكشاف حقيقي إطلاقًا
-  if(S.config.mode==='paper'&&S.keys){ const sym0=S.config.symbol;
+  if(S.config.mode==='paper'&&S.keys&&!S.mirrorLock){ const sym0=S.config.symbol;
     // المخلّفات المحلية الحية المنشأ (تحمل exchangeOrderId) تُصفَّر معها —
     // بقاءها كان يجعل الورقي «يدير» مرآة مركز حقيقي ميت
     if(S.grid.some(g=>g.exchangeOrderId&&(g.status==='armed'||g.status==='open'))){

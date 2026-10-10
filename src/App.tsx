@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   S, subscribe, initEngine, startBot, pauseBot, stopBot, newCycle,
   saveKeys, clearKeys, saveCfg, equity, desk, pulseAge, fmtPx, fmtUsd, fmtTime,
-  listContracts, effLevels, scanRadar, detectRemoteServer,
+  listContracts, effLevels, scanRadar, detectRemoteServer, shutdownServer, unpairServer,
 } from './engine';
 import { streamState } from './ws';
 import Chart from './Chart';
@@ -384,6 +384,19 @@ function SettingsScreen() {
           <button className="btn acc" onClick={() => saveKeys({ apiKey: apiKey.trim(), apiSecret: apiSecret.trim(), passphrase: apiPass.trim() })}>حفظ المفاتيح</button>
           <button className="btn dgr" onClick={() => { clearKeys(); setApiKey(''); setApiSecret(''); setApiPass(''); }}>حذف المفاتيح</button>
         </div>
+        {window.__TRQ_REMOTE && (
+          <button className="btn dgr" style={{ width: '100%', marginTop: 10 }}
+            onClick={() => { if (window.confirm('إيقاف السيرفر نهائيًا؟ يُغلق أي مركز مفتوح ويُلغي كل الأوامر ثم يتوقف تمامًا — لا يعود إلا بأمر التثبيت في Termux.')) shutdownServer(); }}>
+            ⏻ إيقاف السيرفر نهائيًا (يغلق كل شيء)
+          </button>
+        )}
+        {S.serverPaired && !window.__TRQ_REMOTE && (
+          <button className="btn" style={{ width: '100%', marginTop: 10 }}
+            title="يفك الاقتران بسيرفر Termux ويعيد التطبيق عقلًا مستقلًا — لا تستخدمه والسيرفر يعمل"
+            onClick={() => { if (window.confirm('نسيان سيرفر Termux؟ يصبح التطبيق عقلًا مستقلًا. تحذير: إن كان السيرفر لا يزال يعمل فسيصبح لديك عقلان على الحساب!')) unpairServer(); }}>
+            🔗 نسيان السيرفر (فك الاقتران)
+          </button>
+        )}
         <div className="subtle" style={{ textAlign: 'center', marginTop: 8 }}>
           {S.keys
             ? (S.linkOk ? '✅ مربوط بالمنصة فعليًا ••' + S.keys.apiKey.slice(-4) : '⏳ محفوظ — جارٍ التحقق من المنصة…')
@@ -468,6 +481,9 @@ export default function App() {
         </span>
         {window.__TRQ_REMOTE && (
           <span className="pill on" title="المحرك يعمل في سيرفر Termux على هذا الجوال — بلا نوم ولا قتل خلفية">سيرفر</span>
+        )}
+        {S.mirrorLock && (
+          <span className="pill live" title="هذا الجهاز مقترن بسيرفر Termux لا يرد — التشغيل المحلي محجوب حتى لا يعمل عقلان على الحساب">⛔ السيرفر مفقود</span>
         )}
         <span className={'pill ' + (S.config.mode === 'live' ? 'live' : '')}>{S.config.mode === 'live' ? 'LIVE' : 'ورقي'}</span>
         <span className={'pill' + (S.status === 'running' ? ' on' : S.status === 'paused' ? ' warn' : '')}>
