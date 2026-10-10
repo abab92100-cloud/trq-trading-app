@@ -301,9 +301,15 @@ async function kcPublic(path,timeout){
   if(j.code!=='200000') throw new Error(j.msg||j.code);
   return j.data;
 }
-async function kcPrivate(method,path,body){
+// انحراف ساعة الجوال عن ساعة المنصة كان يرفض الطلبات الموقعة
+// (Invalid KC-API-TIMESTAMP) — يُقاس كل 10 دقائق ويُعاد قياسه فور أي رفض زمني
+let _kcTimeOff=0, _kcTimeAt=0;
+async function kcTimeSync(){ try{ const t=await kcPublic('/api/v1/timestamp',2500);
+  const sv=Number(t); if(sv>1e12){ _kcTimeOff=sv-Date.now(); _kcTimeAt=Date.now(); } }catch(e){} }
+async function kcPrivate(method,path,body,_retried){
   if(!S.keys) throw new Error('لا مفاتيح — اربط KuCoin من الإعدادات');
-  const ts=String(Date.now());
+  if(Date.now()-_kcTimeAt>600000) kcTimeSync(); // تحديث خامل كل 10 دقائق
+  const ts=String(Date.now()+_kcTimeOff);
   const raw=body?JSON.stringify(body):'';
   const signStr=ts+method+path+raw;
   const res=await kcFetch(path,{method,cache:'no-store',
@@ -316,7 +322,11 @@ async function kcPrivate(method,path,body){
       'KC-API-KEY-VERSION':'2'},
     body:raw||undefined});
   const j=await res.json().catch(()=>({code:'-1',msg:'bad json'}));
-  if(j.code!=='200000') throw new Error(j.msg||('KuCoin '+res.status));
+  if(j.code!=='200000'){
+    // رفض زمني: أعد ضبط الانحراف فورًا وحاول مرة واحدة أخيرة
+    if(!_retried&&/timestamp/i.test(String(j.msg||''))){ await kcTimeSync();
+      return kcPrivate(method,path,body,true); }
+    throw new Error(j.msg||('KuCoin '+res.status)); }
   return j.data;
 }
 export async function getApiBase(){ return API_BASE; }
@@ -567,6 +577,11 @@ async function exPlaceStopGuard(){ if(S.config.mode!=='live'||!S.keys||!S.positi
   const cands=[sh?e*(1+dDis):e*(1-dDis)];
   if(liq>0) cands.push(sh?liq*0.99:liq*1.01);
   let gp=roundTick(sh?Math.min(...cands):Math.max(...cands),S.tickSize||1e-10);
+  // سقف المسافة: الحارس يحمي حد كارثة الـ$16 لا ما وراءه — سعر أبعد من 12% من
+  // الدخول يعني مدخلات منحطة (تصفية محلية منفجر)، فاعتمد سعر الكارثة وحده.
+  // لو نُفّذ بعيدًا لخسر المركز أضعاف الحد المتفق عليه (لوحظ حارس على -40%)
+  if(gp>0&&(sh?gp>e*(1+0.12):gp<e*(1-0.12)))
+    gp=roundTick(sh?e*(1+dDis):e*(1-dDis),S.tickSize||1e-10);
   // سلامة: سعر منحط أو ملاصق للسوق لا يحمي شيئًا — لا تُرسله
   if(!(gp>0)||(sh?gp<=mark*1.003:gp>=mark*0.997)){ S._guardId=null; return; }
   // حارس قائم قريب من المطلوب = لا شيء — إعادة الإرسال كل دقيقة كانت تراكم أوامر وقف مكدسة
@@ -1065,18 +1080,20 @@ function _harvestCleanup(fp){ if(S.config.mode==='live'&&S.keys){
 function creditExFill(l,delta,fp){ if(!(delta>0)||!(fp>0)) return false;
   l.exFilled=(l.exFilled||0)+delta;
   const mult=S.multiplier||1;
+  // هذه الدالة حصرية للحقيقي (تُستدعى من المزامنة فقط): لقطة المنصة للمركز
+  // (exPosition كل 5ث) هي الكاتبة الوحيدة للحجم والمتوسط — applyDelta هنا كان
+  // يضيف/يخصم مرة ثانية فوق لقطة المنصة (تضخيم مزدوج)، وعند اكتمال الجني كان
+  // يفتح مركزًا وهميًا معكوسًا محليًا لا وجود له على المنصة
   if(!l.reduceOnly){
     const fee=feeFor(delta*mult*fp,false); S.feesPaid+=fee;
-    const dd=applyDelta(l.side,delta,fp);
-    if(dd.addedQty>0){ const lotId=noteEntry(dd.addedQty,fp,fee,l.origin==='hunt'?'hunt':'grid',
-      !!l._counted); l._counted=true; l.lotId=l.lotId||lotId; }
+    const lotId=noteEntry(delta,fp,fee,l.origin==='hunt'?'hunt':'grid',
+      !!l._counted); l._counted=true; l.lotId=l.lotId||lotId;
     S.lastAddAt=Date.now();
     if(l.qty-(l.exFilled||0)>1e-9) pushLog('server','تنفيذ جزئي: دُخل '+delta+' من '+l.qty+
       ' @ '+fmtPx(fp)+' — الباقي معلّق يُكمل أو يُلغى عند الجني');
     if(S.position&&S.status==='running') syncPositionTp();
     return false; }
   const fee=feeFor(delta*mult*fp,false); S.feesPaid+=fee;
-  const dd=applyDelta(l.side,delta,fp);
   const net=notePartialClose(delta,fp,fee,l.lotId);
   S._tpBanked=Math.round(((S._tpBanked||0)+net)*10000)/10000;
   if(!S.position){ // هذا الجزء أتمّ المركز — جني مكتمل
@@ -1193,6 +1210,10 @@ function inAddZone(p){ if(S.status!=='running'||!p) return false;
 // تنفّذ أمر الجني عند بلوغ السعر خطّه فقط.
 function harvestRipe(p){ if(!p||S.status==='idle') return;
   for(const tp of S.grid.filter(g=>g.reduceOnly&&(g.status==='open'||g.status==='armed'))){
+    // الحقيقي: أمر الجني المركون على المنصة ينفَّذ هناك بسعره الدقيق وتصل
+    // التعبئة عبر المزامنة — الإقفال السوقي المحلي عند اللمس كان يلغي الليميت
+    // ويبيع بانزلاق تحت التعادل (جني بخسارة -0.10 المشاهد في الحقيقي)
+    if(S.config.mode==='live'&&S.keys) break;
     const tol=Math.min(S.tickSize>0?S.tickSize*0.5:1e-12, Math.abs(tp.price)*0.0005);
     const crossed=tp.side==='sell'?p>=tp.price-tol:p<=tp.price+tol;
     if(crossed) fillLevel(tp.id,p,true); }
@@ -1847,7 +1868,8 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
         kcPrivate('POST','/api/v2/changeCrossUserLeverage',
           {symbol:sym,leverage:String(S.config.leverage)}).catch(()=>{}); } }
     if(S.position) exPlaceStopGuard(); // إيقاف طوارئ على المنصة يحمي المركز حتى لو نام التطبيق
-  }catch(e){ const m=e.message||String(e);
+  }catch(e){ const m0=e.message||String(e);
+    const m=/abort|timeout/i.test(m0)?'مهلة شبكة عابرة — تُعاد القراءة تلقائيًا':m0;
     if(m!==_syncErrMsg||Date.now()-_syncErrAt>60000){ _syncErrAt=Date.now(); _syncErrMsg=m;
       pushLog('error','قراءة المركز: '+m); } }
   try{
@@ -1892,6 +1914,9 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
         exchangeOrderId:o.orderId,filledAt:null,origin:'grid'}); }
     const want=S.grid.filter(l=>(l.status==='armed'));
     if(!S.permDenied) for(const l of want){ if(l.exchangeOrderId) continue;
+      // معرّف جديد لكل محاولة وضع: المنصة تحفظ clientOid الملغى مدة فترفض
+      // «القيمة موجودة بالفعل» ويتعطل تسليح المستوى (لوحظ في الحقيقي 13:38)
+      l.clientOid=uid('oid');
       try{ const r=await exPlaceLimit({clientOid:l.clientOid,symbol:sym,side:l.side,
         price:l.price,qty:l.qty,reduceOnly:l.reduceOnly,leverage:S.config.leverage});
         l.status='open'; l.exchangeOrderId=r.orderId;
@@ -1912,7 +1937,8 @@ async function liveSync(){ if(S.config.mode!=='live'||!S.keys) return;
       const stops=await exStops(sym);
       if(stops) for(const st of stops){ if(st.id&&st.id!==S._guardId){
         try{ await kcPrivate('DELETE','/api/v1/stopOrders/'+st.id); }catch(e){} } } }
-  }catch(e){ const m=e.message||String(e);
+  }catch(e){ const m0=e.message||String(e);
+    const m=/abort|timeout/i.test(m0)?'مهلة شبكة عابرة — تُعاد المزامنة تلقائيًا':m0;
     // نفس الخطأ مرة كل دقيقة — السطر الواحد كل 5 ثوانٍ كان يغرق السجل ويطلق تنبيهات مجنونة
     if(m!==_syncErrMsg||Date.now()-_syncErrAt>60000){ _syncErrAt=Date.now(); _syncErrMsg=m;
       pushLog('error','مزامنة الأوامر: '+m); } } }
@@ -2111,10 +2137,32 @@ export function saveCfg(v){
   // هدف جني الربح الصافي ($) — يُحفظ فقط إن أُرسل صراحة حتى لا يصفّره حفظ عارض
   if(v.tpNet!=null&&v.tpNet!=='') S.config.tpNet=clamp(+v.tpNet||TP_BASE_NET,0.03,50);
   S.config.cycleBalance=Math.max(1,+v.cycleBalance||100);
-  S.config.directionMode=v.directionMode;
-  S.config.mode=v.mode;
+  if(v.directionMode) S.config.directionMode=v.directionMode;
+  // الوضع يُطبَّق بقيمة صالحة صريحة فقط — حفظ عارض بلا mode كان يصفّره
+  // إلى undefined فيسكت محرك الحقيقي والأوامر مركونة على المنصة بلا رقيب
+  const oldMode=S.config.mode;
+  if(v.mode==='live'||v.mode==='paper') S.config.mode=v.mode;
   S.sound=!!v.sound;
   if(v.soundTone) S.soundTone=v.soundTone;
+  // الانتقال حقيقي→ورقي يؤمّن جانب المنصة فورًا: أوامر مركونة ومركز مفتوح
+  // بلا رقيب (المزامنة الحقيقية تتعطل في الورقي) = «الصفقة المعلقة» التي
+  // حدثت للمالك. الورقي يعني صفر انكشاف حقيقي: إلغاء كل الأوامر وإغلاق
+  // أي مركز متبقٍ مع تأكيد وإشعار صريح، وتصفير المرآة المحلية له
+  if(oldMode==='live'&&S.config.mode==='paper'&&S.keys){
+    const symLive=S.config.symbol;
+    for(const g of S.grid){ if(g.status==='armed'||g.status==='open'){
+      g.status='cancelled'; g.exchangeOrderId=null; } }
+    S.position=null; S._guardId=null; S._tpBanked=0;
+    S.ignoreExchangeUntil=Date.now()+15000;
+    (async()=>{ try{ await exCancelAll(symLive); await exCancelStops(symLive); }catch(e){}
+      try{ let pos=await exPosition(symLive);
+        if(pos){ for(let i=0;i<4&&pos;i++){ try{ await exCloseQty(symLive,pos.side,pos.size); }catch(e){}
+            await new Promise(r=>setTimeout(r,700));
+            pos=await exPosition(symLive).catch(()=>null); }
+          pushLog('server','⚠️ تحوّل إلى ورقي — أُغلق المركز الحقيقي المتبقي وأُلغيت كل الأوامر — الورقي لا يلمس المنصة أبدًا');
+          notify('الوضع الورقي: أُغلق المركز الحقيقي وأُلغيت أوامر المنصة','warn'); }
+        else pushLog('server','تحوّل إلى ورقي — أُلغيت أوامر المنصة، لا مركز حقيقي متبقٍ');
+      }catch(e){ pushLog('error','تأمين المنصة عند التحول للورقي فشل: '+(e.message||e)); } })(); }
   if(sym!==old){
     // الوضع الحقيقي: ألغِ أوامر الزوج السابق وأوقفه وأغلق مركزه قبل الانتقال — لا أوامر يتيمة بلا رقيب
     if(S.config.mode==='live'&&S.keys){ exCancelAll(old).catch(()=>{});
@@ -2188,6 +2236,24 @@ export function initEngine(){
   if(S.config.symbol==='BTCUSDTM') S.config.symbol='XBTUSDTM'; // الرمز الصحيح في عقود KuCoin
   S.config.displaySymbol=S.config.symbol.replace(/USDTM$/i,'').replace(/^XBT$/i,'BTC');
   pushLog('info','TRQ Trading جاهز — '+(S.config.mode==='live'?'وضع LIVE':'وضع ورقي'));
+  kcTimeSync(); // ضبط انحراف ساعة الجهاز عن المنصة قبل أي طلب موقّع
+  // إقلاع في وضع ورقي بمفاتيح محفوظة: أي أوامر/مركز على المنصة مخلّفات جلسة
+  // حقيقية سابقة بلا رقيب (السبب الفعلي لصفقة المالك المعلقة فجرًا) — تُؤمَّن
+  // فورًا: إلغاء الكل وإغلاق أي مركز متبقٍ. الورقي = صفر انكشاف حقيقي إطلاقًا
+  if(S.config.mode==='paper'&&S.keys){ const sym0=S.config.symbol;
+    // المخلّفات المحلية الحية المنشأ (تحمل exchangeOrderId) تُصفَّر معها —
+    // بقاءها كان يجعل الورقي «يدير» مرآة مركز حقيقي ميت
+    if(S.grid.some(g=>g.exchangeOrderId&&(g.status==='armed'||g.status==='open'))){
+      for(const g of S.grid){ if(g.status==='armed'||g.status==='open'){
+        g.status='cancelled'; g.exchangeOrderId=null; } }
+      S.position=null; S._tpBanked=0; }
+    (async()=>{ try{ await exCancelAll(sym0); await exCancelStops(sym0); }catch(e){}
+      try{ let pos=await exPosition(sym0);
+        if(pos){ for(let i=0;i<4&&pos;i++){ try{ await exCloseQty(sym0,pos.side,pos.size); }catch(e){}
+            await new Promise(r=>setTimeout(r,700));
+            pos=await exPosition(sym0).catch(()=>null); }
+          pushLog('server','⚠️ إقلاع ورقي: أُغلقت مخلّفات مركز حقيقي من جلسة سابقة وأُلغيت أوامرها');
+          notify('الوضع ورقي — أُغلقت مخلّفات حقيقية قديمة على المنصة','warn'); } }catch(e){} })(); }
   // قناة الدفع المستمرة — تتصل فورًا وتعيد الاتصال تلقائيًا عند أي انقطاع
   startStream(S.config.symbol,{ onMessage:onStreamTick, onStatus:()=>emitThrottled() });
   setInterval(botTick,TICK_MS);
